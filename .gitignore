@@ -50,3 +50,17 @@ nul
 
 # Server
 server/
+
+# File nặng (models, tools zip)
+*.zip
+*.rar
+boom_tools*
+boom_models*
+models/
+data/tools/
+espeak-ng-data/
+
+# File lớn khác
+*.onnx
+*.dll
+*.so
