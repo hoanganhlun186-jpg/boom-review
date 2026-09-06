@@ -6903,29 +6903,23 @@ def run_app():
     app = App()
     app.show()
 
-    # ── License check đã tắt → mở app thẳng ─────────────────────────────────
-    def _check_license_after_start():
-        app.update_license_display(None)
-        app.deiconify()
-        _start_update_check()
-
+    # ── Update check ngầm sau 5 giây ─────────────────────────────────────────
     def _start_update_check():
-        """Kiểm tra update ngầm — không block UI, hiện dialog nếu có bản mới."""
         try:
             from engine.updater import check_update_async, show_update_dialog
 
             def on_update_result(result):
                 if result:
-                    app.after(0, lambda: show_update_dialog(app, result))
+                    show_update_dialog(app, result)
 
             def _delayed_check():
                 check_update_async(on_update_result)
 
-            app.after(5000, _delayed_check)
+            QTimer.singleShot(5000, _delayed_check)
         except Exception:
             pass
 
-    app.after(100, _check_license_after_start)
+    QTimer.singleShot(100, _start_update_check)
     # ─────────────────────────────────────────────────────────────────────────
     sys.exit(qapp.exec())
 

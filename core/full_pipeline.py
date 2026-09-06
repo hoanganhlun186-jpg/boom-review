@@ -1593,6 +1593,30 @@ class FullPipeline:
         if self.step_callback:
             self._safe_step_callback(name, "skipped")
 
+    def _with_retry(self, step_fn, step_name: str = "", max_retries: int = 3) -> bool:
+        """Chạy step_fn, tự retry tối đa max_retries lần nếu trả về False.
+        Dùng cho các bước có thể fail do mạng/AI timeout (không phải lỗi logic).
+        """
+        import time
+        for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                wait = 3 * attempt
+                self._log(f"   ♻️  [{step_name}] Thử lại lần {attempt}/{max_retries} (chờ {wait}s)...")
+                time.sleep(wait)
+                # Reset step status về pending để step_fn có thể chạy lại
+                step = self.steps.get(step_name)
+                if step:
+                    step.status = "pending"
+                    step.error = ""
+                    step.duration_s = 0.0
+            result = step_fn()
+            if result:
+                return True
+            if attempt < max_retries:
+                self._log(f"   ⚠️  [{step_name}] Lần {attempt} thất bại, sẽ tự thử lại...")
+        self._log(f"   ❌ [{step_name}] Thất bại sau {max_retries} lần thử.")
+        return False
+
     def _ffmpeg(self):
         try:
             from utils.helpers import FFmpegUtils
@@ -4754,18 +4778,41 @@ class FullPipeline:
             return cleaned[:limit].rstrip(" ,.;:")
         return ""
 
+    # Template pool để tránh lặp câu mở đầu
+    _FALLBACK_TEMPLATES_WITH_FOCUS = [
+        "{focus} — khoảnh khắc đủ để đẩy câu chuyện sang một hướng không ai ngờ tới.",
+        "Cảnh {focus} khiến mạch truyện chuyển sang nhịp căng hơn, buộc mọi người phải chú ý.",
+        "{focus} — chi tiết nhỏ nhưng đủ sức làm thay đổi cục diện của cả câu chuyện.",
+        "Từ {focus}, tình thế bắt đầu nghiêng về một hướng mới mà các nhân vật chưa kịp chuẩn bị.",
+        "{focus} trở thành điểm then chốt, kéo theo hàng loạt phản ứng dây chuyền trong câu chuyện.",
+        "Nhìn vào {focus}, người xem hiểu ngay rằng câu chuyện đang bước sang một giai đoạn mới.",
+        "{focus} — dấu hiệu cho thấy cục diện sắp đảo lộn hoàn toàn.",
+        "Cảnh {focus} lặng lẽ nhưng đủ sức làm thay đổi mọi thứ trong tập phim này.",
+    ]
+    _FALLBACK_TEMPLATES_NO_FOCUS = [
+        "Mạch truyện tiếp tục căng lên với những bước ngoặt bất ngờ dồn dập.",
+        "Câu chuyện leo thang theo chiều hướng không ai dự đoán được.",
+        "Các nhân vật phải đối mặt với một tình huống mới đẩy câu chuyện lên cao trào.",
+        "Diễn biến tiếp theo khiến mọi sắp xếp trước đó trở nên vô nghĩa.",
+        "Những gì xảy ra tiếp theo sẽ quyết định hướng đi của toàn bộ câu chuyện.",
+    ]
+    _fallback_call_counter: int = 0
+
     @classmethod
     def _generic_review_fallback(cls, movie_title: str = "", focus: str = "") -> str:
+        import threading
+        # Thread-safe counter để chọn template khác nhau mỗi lần gọi
+        cls._fallback_call_counter = (getattr(cls, "_fallback_call_counter", 0) + 1) % 100
+        idx = cls._fallback_call_counter
         focus = cls._usable_vietnamese_focus(focus, limit=110)
         if focus:
-            return (
-                f"Từ dấu hiệu {focus}, bầu không khí trong cảnh này căng lên rõ rệt, "
-                "buộc các nhân vật phải đối mặt với một hướng rẽ mới của câu chuyện."
-            )
-        return (
-            f"Mạch truyện của {movie_title or 'bộ phim'} tiếp tục căng lên, "
-            "khi những nghi vấn mới buộc các nhân vật phải bước tiếp."
-        )
+            templates = cls._FALLBACK_TEMPLATES_WITH_FOCUS
+            tpl = templates[idx % len(templates)]
+            return tpl.format(focus=focus)
+        templates = cls._FALLBACK_TEMPLATES_NO_FOCUS
+        tpl = templates[idx % len(templates)]
+        title = movie_title or "bộ phim"
+        return tpl
 
     def step_voice_segments(self) -> bool:
         """Tao voice TUNG BLOCK, moi block khop dung duration cua canh video.
@@ -5183,8 +5230,19 @@ class FullPipeline:
                                 "   🔒 Script Editor đã xác nhận -> chỉ bỏ qua lỗi market không nghiêm trọng, tiếp tục tạo voice/render"
                             )
                         elif real_errors:
-                            self._step_fail("VOICE_SEGMENTS", self._market_fail_message(market_report))
-                            return False
+                            # Trong auto-pipeline (không có Script Editor): bỏ qua
+                            # too_many_under_target_blocks vì timing repair / atempo sẽ xử lý.
+                            _auto_bypass = {"too_many_under_target_blocks", "some_under_target_blocks"}
+                            _blocking = [
+                                item for item in real_errors
+                                if str(item.get("type") or "") not in _auto_bypass
+                            ]
+                            if _blocking:
+                                self._step_fail("VOICE_SEGMENTS", self._market_fail_message(market_report))
+                                return False
+                            self._log(
+                                "   ℹ️  Market: block ngắn hơn target → timing repair sẽ xử lý, tiếp tục TTS"
+                            )
                         else:
                             self._log("   ℹ️  Market WARN (đã fill blocks) → tiếp tục TTS")
                 except Exception as e:
@@ -5495,7 +5553,10 @@ class FullPipeline:
                         block["text"] = cleaned_sanitized
                         block["embedded_dialogue_repetition_removed"] = True
                         sanitized_before_tts += 1
-                    if (not editor_synced) and (_has_technical_tts_text(text) or _has_technical_tts_text(clean)):
+                    # Chỉ check `clean` (đã lọc CJK/markers), không check `text` gốc.
+                    # Nếu check `text` gốc: AI viết script có chữ Hán inline → CJK check
+                    # kích hoạt fallback dù Vietnamese đã được clean OK.
+                    if (not editor_synced) and _has_technical_tts_text(clean):
                         clean = AIEngine._clean_tts_text(_natural_tts_fallback(rb, bid))
                         block["text"] = clean
                         block["technical_fallback_rewritten_before_tts"] = True
@@ -7270,12 +7331,12 @@ class FullPipeline:
 
         # 6. AI_FULL: viết story chapter và narration toàn phim trước.
         # AI dùng scene/SRT/keyframe context để lập kế hoạch story, chưa cắt video thật.
-        if not self.step_ai_full():
+        if not self._with_retry(self.step_ai_full, "AI_FULL"):
             return False
 
         # 7. CLIP_FIND: chọn/cắt cảnh thật theo narration đã viết.
         # SRT gốc vẫn map theo original_start/original_end của video gốc.
-        if not self.step_clip_find():
+        if not self._with_retry(self.step_clip_find, "CLIP_FIND"):
             return False
         if self.ai_package.get("script_blocks"):
             self.ai_package = self._attach_review_clips_to_package(self.ai_package, self.render_blocks)
@@ -7319,21 +7380,21 @@ class FullPipeline:
         # ── END SCRIPT REVIEW ────────────────────────────────────────────────
 
         # 8. VOICE_SEGMENTS
-        if not self.step_voice_segments():
+        if not self._with_retry(self.step_voice_segments, "VOICE_SEGMENTS"):
             return False
 
         # 9. VOICE_CONCAT
-        if not self.step_voice_concat():
+        if not self._with_retry(self.step_voice_concat, "VOICE_CONCAT"):
             return False
 
         # 10. VOICE_SRT
-        if not self._repair_recorded_voice_alignment():
+        if not self._with_retry(self._repair_recorded_voice_alignment, "VOICE_SRT"):
             return False
-        if not self.step_voice_srt():
+        if not self._with_retry(self.step_voice_srt, "VOICE_SRT"):
             return False
 
         # 11. RENDER_FINAL
-        if not self.step_render_final():
+        if not self._with_retry(self.step_render_final, "RENDER_FINAL"):
             return False
 
         self._log("\n" + "=" * 60)

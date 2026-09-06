@@ -1,236 +1,161 @@
 """
-AutoRecapPro V2 - Auto Update Checker
-======================================
-Kiểm tra phiên bản mới từ Supabase.
-Khi có update: hiện thông báo + link tải.
+engine/updater.py — Kiểm tra phiên bản mới từ AnhStudio Server
 Không tự download — user chủ động tải.
 """
 
-import json
-import sys
-import threading
-import urllib.request
-import urllib.error
+import json, sys, threading, urllib.request, urllib.error
 from pathlib import Path
 from typing import Optional, Callable
 
-# ── Đọc version hiện tại từ version.txt bundled ──────────────────────────────
+SERVER_URL = "http://163.61.182.119:8000"
+_APP_ID    = "boomreview"
+
+# ── Đọc version hiện tại từ version.txt ──────────────────────────────────────
 def _get_app_base() -> Path:
-    if getattr(sys, 'frozen', False) or globals().get('__compiled__'):
+    if getattr(sys, "frozen", False) or globals().get("__compiled__"):
         return Path(sys.executable).parent
     return Path(__file__).parent.parent
 
 
 def get_current_version() -> str:
-    """Đọc version từ version.txt trong folder app."""
-    candidates = [
+    for ver_file in [
         _get_app_base() / "version.txt",
         Path(__file__).resolve().parent.parent / "version.txt",
-    ]
-    for ver_file in candidates:
+    ]:
         try:
             if ver_file.exists():
                 return ver_file.read_text(encoding="utf-8-sig").strip().split("\n")[0].strip()
         except Exception:
             continue
-    return "2.0.0"
+    return "1.0.0"
 
 
 def _parse_version(ver: str):
-    """Chuyển '2.1.3' → (2, 1, 3) để so sánh."""
     try:
         return tuple(int(x) for x in ver.strip().split("."))
     except Exception:
         return (0, 0, 0)
 
 
-# ── Check update từ Supabase public table ────────────────────────────────────
-# Bảng "app_versions" trong Supabase — public read, không cần auth
-# Tạo bảng:
-#   CREATE TABLE app_versions (
-#     app_id TEXT PRIMARY KEY,
-#     latest_version TEXT,
-#     download_url TEXT,
-#     release_notes TEXT,
-#     updated_at TIMESTAMPTZ DEFAULT NOW()
-#   );
-#   INSERT INTO app_versions VALUES (
-#     'autorecappro_v2', '2.0.0',
-#     'https://drive.google.com/...',
-#     'Phiên bản đầu tiên',
-#     NOW()
-#   );
-# Nhớ set RLS policy: SELECT for public (anon) role
-
-_SUPABASE_URL = None  # Tự lấy từ license_guard để tránh lặp
-_APP_ID = "autorecappro_v2"
-
-
-def _get_supabase_url() -> str:
-    global _SUPABASE_URL
-    if _SUPABASE_URL:
-        return _SUPABASE_URL
-    try:
-        from engine.license_guard import SUPABASE_URL, SUPABASE_KEY
-        _SUPABASE_URL = (SUPABASE_URL, SUPABASE_KEY)
-    except Exception:
-        _SUPABASE_URL = ("", "")
-    return _SUPABASE_URL
-
-
+# ── Gọi API server lấy version mới nhất ──────────────────────────────────────
 def check_for_update(timeout: int = 8) -> Optional[dict]:
     """
-    Kiểm tra có bản mới không.
-    
-    Returns:
-        None nếu đang dùng bản mới nhất hoặc lỗi
-        dict nếu có bản mới: {
-            'latest': '2.1.0',
-            'current': '2.0.0', 
-            'download_url': 'https://...',
-            'release_notes': '...'
-        }
+    Trả về None nếu đang dùng bản mới nhất hoặc lỗi.
+    Trả về dict nếu có bản mới: {latest, current, download_url, release_notes}
     """
     try:
-        url_key = _get_supabase_url()
-        if not url_key[0]:
-            return None
-
-        supabase_url, supabase_key = url_key
-        url = f"{supabase_url.rstrip('/')}/rest/v1/app_versions?app_id=eq.{_APP_ID}&select=latest_version,download_url,release_notes"
-        
+        url = f"{SERVER_URL}/api/version/{_APP_ID}"
         req = urllib.request.Request(url, method="GET")
-        req.add_header("apikey", supabase_key)
-        req.add_header("Authorization", f"Bearer {supabase_key}")
         req.add_header("Accept", "application/json")
 
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            rows = json.loads(resp.read().decode("utf-8", errors="replace"))
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
 
-        if not rows:
-            return None
-
-        row = rows[0]
-        latest = str(row.get("latest_version", "")).strip()
+        latest  = str(data.get("version", "")).strip()
         current = get_current_version()
 
         if not latest:
             return None
 
-        # So sánh version
         if _parse_version(latest) > _parse_version(current):
             return {
-                "latest": latest,
-                "current": current,
-                "download_url": str(row.get("download_url", "") or ""),
-                "release_notes": str(row.get("release_notes", "") or ""),
+                "latest":        latest,
+                "current":       current,
+                "download_url":  str(data.get("download_url", "") or ""),
+                "release_notes": str(data.get("release_notes", "") or ""),
             }
-
-        return None  # Đang dùng bản mới nhất
+        return None
 
     except Exception:
-        return None  # Lỗi mạng — bỏ qua
+        return None
 
 
 def check_update_async(callback: Callable[[Optional[dict]], None]):
-    """
-    Kiểm tra update trong background thread.
-    Gọi callback(result) khi xong.
-    
-    Usage:
-        def on_update(result):
-            if result:
-                show_update_dialog(result['latest'], result['download_url'])
-        
-        check_update_async(on_update)
-    """
+    """Kiểm tra update trong background thread, gọi callback khi xong."""
     def _run():
         result = check_for_update()
         try:
             callback(result)
         except Exception:
             pass
-
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     return t
 
 
-# ── UI Helper — hiện dialog thông báo update ─────────────────────────────────
+# ── Dialog thông báo update (PySide6) ────────────────────────────────────────
 def show_update_dialog(parent, update_info: dict):
-    """
-    Hiện dialog thông báo có bản mới.
-    Gọi từ main thread (tkinter).
-    
-    Args:
-        parent: CTk root window
-        update_info: dict từ check_for_update()
-    """
+    """Hiện dialog có bản mới. Gọi từ main thread."""
     try:
-        import customtkinter as ctk
         import webbrowser
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QFont
 
-        dialog = ctk.CTkToplevel(parent)
-        dialog.title("Có phiên bản mới!")
-        dialog.geometry("420x280")
-        dialog.resizable(False, False)
-        dialog.grab_set()
+        dlg = QDialog(parent)
+        dlg.setWindowTitle("Có phiên bản mới!")
+        dlg.setFixedSize(420, 240)
+        dlg.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint)
 
-        # Center
-        dialog.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 420) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 280) // 2
-        dialog.geometry(f"+{x}+{y}")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(28, 20, 28, 20)
+        layout.setSpacing(10)
 
-        ctk.CTkLabel(
-            dialog, text="🎉 Có phiên bản mới!",
-            font=ctk.CTkFont(size=18, weight="bold")
-        ).pack(pady=(24, 8))
+        title = QLabel("🎉  Có phiên bản mới!")
+        title.setFont(QFont("Segoe UI", 15, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
 
-        ctk.CTkLabel(
-            dialog,
-            text=f"Phiên bản hiện tại: v{update_info['current']}\n"
-                 f"Phiên bản mới nhất: v{update_info['latest']}",
-            font=ctk.CTkFont(size=13)
-        ).pack(pady=4)
+        info = QLabel(
+            f"Phiên bản hiện tại: v{update_info['current']}\n"
+            f"Phiên bản mới nhất: v{update_info['latest']}"
+        )
+        info.setAlignment(Qt.AlignCenter)
+        info.setStyleSheet("font-size: 13px;")
+        layout.addWidget(info)
 
         if update_info.get("release_notes"):
-            notes_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-            notes_frame.pack(fill="x", padx=24, pady=8)
-            ctk.CTkLabel(
-                notes_frame,
-                text=f"📋 {update_info['release_notes'][:120]}",
-                font=ctk.CTkFont(size=11),
-                text_color="gray",
-                wraplength=370,
-                justify="left"
-            ).pack()
+            notes = QLabel(f"📋 {update_info['release_notes'][:150]}")
+            notes.setWordWrap(True)
+            notes.setAlignment(Qt.AlignCenter)
+            notes.setStyleSheet("font-size: 11px; color: #888;")
+            layout.addWidget(notes)
 
-        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-        btn_frame.pack(pady=16)
+        layout.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+
+        btn_dl = QPushButton("⬇️  Tải về ngay")
+        btn_dl.setFixedHeight(36)
+        btn_dl.setStyleSheet("""
+            QPushButton { background:#6366f1; color:white; border-radius:8px;
+                          font-size:13px; font-weight:bold; }
+            QPushButton:hover { background:#4f46e5; }
+        """)
+
+        btn_skip = QPushButton("Để sau")
+        btn_skip.setFixedHeight(36)
+        btn_skip.setStyleSheet("""
+            QPushButton { background:transparent; color:#555; border:1px solid #ccc;
+                          border-radius:8px; font-size:13px; }
+            QPushButton:hover { background:#f0f0f0; }
+        """)
 
         def _download():
             url = update_info.get("download_url", "")
             if url:
                 webbrowser.open(url)
-            dialog.destroy()
+            dlg.accept()
 
-        ctk.CTkButton(
-            btn_frame, text="⬇️ Tải về ngay",
-            width=140, height=36,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color="#6366f1", hover_color="#4f46e5",
-            command=_download
-        ).pack(side="left", padx=8)
+        btn_dl.clicked.connect(_download)
+        btn_skip.clicked.connect(dlg.reject)
 
-        ctk.CTkButton(
-            btn_frame, text="Để sau",
-            width=100, height=36,
-            font=ctk.CTkFont(size=13),
-            fg_color="transparent",
-            border_width=1,
-            command=dialog.destroy
-        ).pack(side="left", padx=8)
+        btn_row.addWidget(btn_dl)
+        btn_row.addWidget(btn_skip)
+        layout.addLayout(btn_row)
+
+        dlg.exec()
 
     except Exception as e:
         print(f"[Updater] Dialog error: {e}")
