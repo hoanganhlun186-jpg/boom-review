@@ -1,0 +1,52 @@
+# Môi trường Python
+.venv/
+.venv_py312/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Build output
+dist/
+dist_standalone/
+dist_debug/
+build_logs/
+*.build/
+*.dist/
+*.onefile-build/
+
+# FFmpeg (quá nặng cho GitHub, khách tự tải)
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe
+
+# Config cá nhân (có API key, path máy tính)
+config.json
+capcut_device.json
+
+# File xuất / exports
+exports/
+
+# File test audio tạm
+*.mp3
+temp_*.mp3
+test_*.mp3
+
+# File backup
+*.bak
+*.tmp
+
+# Logs
+*.log
+py_run_log.txt
+nuitka-crash-report.xml
+
+# File rác
+_nul
+nul
+
+# Claude outputs
+"Claude outputs"/
+
+# Server
+server/

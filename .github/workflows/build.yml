@@ -1,0 +1,114 @@
+name: Build BoomReview.exe
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install nuitka zstandard ordered-set
+          pip install -r requirements.txt
+          pip install requests certifi urllib3 charset-normalizer
+
+      - name: Build with Nuitka
+        run: |
+          python -m nuitka `
+            --standalone `
+            --jobs=2 `
+            --windows-console-mode=disable `
+            --windows-product-name="BOOM Review" `
+            --windows-product-version=${{ steps.version.outputs.VERSION }}.0 `
+            --windows-file-version=${{ steps.version.outputs.VERSION }}.0 `
+            --windows-file-description="AI Video Recap Generator" `
+            --windows-company-name="Anh Studio" `
+            --windows-icon-from-ico=assets\boom_icon.ico `
+            --output-dir=dist `
+            --output-filename=BoomReview.exe `
+            --include-package=engine `
+            --include-package=core `
+            --include-package=ui `
+            --include-package=utils `
+            --include-package=capcut_tts_api `
+            --include-package=requests `
+            --include-package=curl_cffi `
+            --include-package=PySide6 `
+            --include-package=google `
+            --include-package-data=customtkinter `
+            --include-package-data=edge_tts `
+            --include-package-data=certifi `
+            --nofollow-import-to=librosa `
+            --nofollow-import-to=scipy `
+            --nofollow-import-to=numba `
+            --nofollow-import-to=torch `
+            --nofollow-import-to=matplotlib `
+            --nofollow-import-to=pytest `
+            --nofollow-import-to=unittest `
+            --nofollow-import-to=pyautogui `
+            --enable-plugin=pyside6 `
+            --enable-plugin=tk-inter `
+            --assume-yes-for-downloads `
+            main.py
+
+      - name: Copy assets & CA bundle
+        shell: python
+        run: |
+          import shutil, certifi
+          from pathlib import Path
+          dist = Path("dist/main.dist")
+          shutil.copytree("assets", dist / "assets", dirs_exist_ok=True)
+          shutil.copy2(certifi.where(), dist / "cacert.pem")
+          # Xoa capcut_device.json - moi khach tu tao fingerprint rieng
+          (dist / "capcut_device.json").unlink(missing_ok=True)
+          # Copy version.txt
+          shutil.copy2("version.txt", dist / "version.txt")
+          print("Assets copied OK")
+
+      - name: Sanitize config for release
+        run: python build_sanitize_config.py "dist\main.dist\config.json"
+
+      - name: Zip release
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.VERSION }}"
+          Compress-Archive -Path "dist\main.dist\*" -DestinationPath "BoomReview-v$ver-win64.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "BOOM Review ${{ github.ref_name }}"
+          body: |
+            ## BOOM Review ${{ github.ref_name }}
+
+            ### Cài đặt
+            1. Tải file zip bên dưới
+            2. Giải nén ra thư mục bất kỳ
+            3. Chạy `BoomReview.exe`
+
+            > **Lưu ý:** Cần có FFmpeg — đặt `ffmpeg.exe`, `ffprobe.exe` cùng thư mục với exe.
+          files: BoomReview-v${{ steps.version.outputs.VERSION }}-win64.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

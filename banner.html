@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1200">
+<title>AutoRecapPro V2 Banner</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;700;800;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Be Vietnam Pro', sans-serif;
+    background: #0a0a0f;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 40px;
+    padding: 40px;
+  }
+
+  /* ═══════════════════════════════════════════════
+     BANNER 1 — Facebook / Zalo Post 1200×628
+  ═══════════════════════════════════════════════ */
+  .banner-fb {
+    width: 1200px;
+    height: 628px;
+    background: linear-gradient(135deg, #0d0d1a 0%, #0f1535 40%, #0a1a2e 100%);
+    border-radius: 16px;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    align-items: center;
+    border: 1px solid rgba(99,179,237,0.15);
+  }
+
+  /* Glow background blobs */
+  .banner-fb::before {
+    content: '';
+    position: absolute;
+    top: -100px; right: -100px;
+    width: 500px; height: 500px;
+    background: radial-gradient(circle, rgba(99,102,241,0.25) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .banner-fb::after {
+    content: '';
+    position: absolute;
+    bottom: -80px; left: 200px;
+    width: 400px; height: 400px;
+    background: radial-gradient(circle, rgba(6,182,212,0.15) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  /* Grid lines overlay */
+  .grid-overlay {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(99,102,241,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(99,102,241,0.04) 1px, transparent 1px);
+    background-size: 60px 60px;
+  }
+
+  /* LEFT SIDE */
+  .fb-left {
+    flex: 1;
+    padding: 50px 0 50px 60px;
+    position: relative;
+    z-index: 2;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(99,102,241,0.15);
+    border: 1px solid rgba(99,102,241,0.4);
+    border-radius: 100px;
+    padding: 6px 16px;
+    margin-bottom: 20px;
+  }
+  .badge-dot {
+    width: 8px; height: 8px;
+    background: #6366f1;
+    border-radius: 50%;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity:1; transform:scale(1); }
+    50% { opacity:0.5; transform:scale(1.3); }
+  }
+  .badge span {
+    font-size: 12px;
+    font-weight: 600;
+    color: #a5b4fc;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .main-title {
+    font-size: 52px;
+    font-weight: 900;
+    line-height: 1.1;
+    margin-bottom: 8px;
+  }
+  .main-title .line1 { color: #ffffff; }
+  .main-title .line2 {
+    background: linear-gradient(90deg, #6366f1, #06b6d4, #6366f1);
+    background-size: 200%;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: shimmer 3s linear infinite;
+  }
+  @keyframes shimmer {
+    0% { background-position: 0% }
+    100% { background-position: 200% }
+  }
+
+  .sub-title {
+    font-size: 16px;
+    color: #94a3b8;
+    margin-bottom: 28px;
+    font-weight: 400;
+    line-height: 1.6;
+  }
+
+  .features {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 32px;
+  }
+  .feat-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    color: #cbd5e1;
+    font-weight: 500;
+  }
+  .feat-icon {
+    width: 22px; height: 22px;
+    background: linear-gradient(135deg, #6366f1, #06b6d4);
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+
+  .pricing-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .price-card {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px;
+    padding: 14px 20px;
+    text-align: center;
+  }
+  .price-card.hot {
+    background: linear-gradient(135deg, rgba(99,102,241,0.2), rgba(6,182,212,0.1));
+    border-color: rgba(99,102,241,0.5);
+    position: relative;
+  }
+  .hot-tag {
+    position: absolute;
+    top: -10px; left: 50%; transform: translateX(-50%);
+    background: linear-gradient(90deg, #6366f1, #06b6d4);
+    border-radius: 100px;
+    padding: 2px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    color: white;
+    white-space: nowrap;
+  }
+  .price-label {
+    font-size: 11px;
+    color: #64748b;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .price-amount {
+    font-size: 26px;
+    font-weight: 900;
+    color: #ffffff;
+  }
+  .price-amount span {
+    font-size: 13px;
+    color: #94a3b8;
+    font-weight: 500;
+  }
+
+  /* RIGHT SIDE — App mockup */
+  .fb-right {
+    width: 520px;
+    height: 100%;
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .mockup-window {
+    width: 420px;
+    background: rgba(15,20,40,0.9);
+    border: 1px solid rgba(99,102,241,0.3);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow:
+      0 0 60px rgba(99,102,241,0.15),
+      0 20px 60px rgba(0,0,0,0.5),
+      inset 0 1px 0 rgba(255,255,255,0.05);
+    transform: perspective(800px) rotateY(-8deg) rotateX(2deg);
+  }
+
+  .window-bar {
+    background: rgba(255,255,255,0.04);
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .dot { width:10px;height:10px;border-radius:50%; }
+  .dot.r{background:#ff5f57;} .dot.y{background:#ffbd2e;} .dot.g{background:#28c840;}
+  .window-title {
+    flex: 1;
+    text-align: center;
+    font-size: 11px;
+    color: #475569;
+    font-weight: 500;
+  }
+
+  .window-body { padding: 16px; }
+
+  .pip-track {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .pip-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .pip-name { font-size: 11px; color: #94a3b8; font-weight: 600; }
+  .pip-status {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-weight: 600;
+  }
+  .pip-status.done { background:rgba(34,197,94,0.15); color:#4ade80; }
+  .pip-status.run { background:rgba(99,102,241,0.2); color:#a5b4fc; }
+  .pip-status.wait { background:rgba(100,116,139,0.15); color:#64748b; }
+
+  .pip-bar-bg {
+    height: 4px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .pip-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #6366f1, #06b6d4);
+  }
+
+  .log-area {
+    background: rgba(0,0,0,0.3);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    line-height: 1.8;
+  }
+  .log-line { display: flex; gap: 8px; }
+  .log-time { color: #475569; }
+  .log-ok { color: #4ade80; }
+  .log-info { color: #06b6d4; }
+  .log-warn { color: #fbbf24; }
+
+  /* ═══════════════════════════════════════════════
+     BANNER 2 — Story / Reels 1080×1920 (scaled 540×960)
+  ═══════════════════════════════════════════════ */
+  .banner-story {
+    width: 540px;
+    height: 960px;
+    background: linear-gradient(160deg, #0d0d1a 0%, #0f1535 50%, #0a1828 100%);
+    border-radius: 24px;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 50px 40px;
+    border: 1px solid rgba(99,179,237,0.1);
+  }
+  .banner-story::before {
+    content: '';
+    position: absolute;
+    top: -150px; left: 50%; transform: translateX(-50%);
+    width: 600px; height: 600px;
+    background: radial-gradient(circle, rgba(99,102,241,0.2) 0%, transparent 65%);
+    pointer-events: none;
+  }
+  .banner-story::after {
+    content: '';
+    position: absolute;
+    bottom: -100px; left: 50%; transform: translateX(-50%);
+    width: 500px; height: 400px;
+    background: radial-gradient(circle, rgba(6,182,212,0.12) 0%, transparent 65%);
+    pointer-events: none;
+  }
+
+  .story-content { position: relative; z-index: 2; text-align: center; width: 100%; }
+
+  .story-logo {
+    width: 80px; height: 80px;
+    background: linear-gradient(135deg, #6366f1, #06b6d4);
+    border-radius: 22px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 36px;
+    margin: 0 auto 20px;
+    box-shadow: 0 0 40px rgba(99,102,241,0.4);
+  }
+
+  .story-title {
+    font-size: 36px;
+    font-weight: 900;
+    color: white;
+    margin-bottom: 6px;
+    line-height: 1.1;
+  }
+  .story-title .gradient {
+    background: linear-gradient(90deg, #6366f1, #06b6d4);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .story-sub {
+    font-size: 14px;
+    color: #64748b;
+    margin-bottom: 36px;
+    font-weight: 500;
+  }
+
+  .story-features {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 36px;
+    text-align: left;
+  }
+  .story-feat {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 14px;
+    padding: 14px 18px;
+  }
+  .story-feat-icon {
+    font-size: 22px;
+    width: 44px; height: 44px;
+    background: linear-gradient(135deg, rgba(99,102,241,0.2), rgba(6,182,212,0.1));
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .story-feat-text { flex: 1; }
+  .story-feat-title { font-size: 13px; font-weight: 700; color: #e2e8f0; margin-bottom: 2px; }
+  .story-feat-desc { font-size: 11px; color: #64748b; line-height: 1.4; }
+
+  .story-pricing {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 28px;
+    width: 100%;
+  }
+  .story-price {
+    flex: 1;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    padding: 16px 12px;
+    text-align: center;
+    position: relative;
+  }
+  .story-price.featured {
+    background: linear-gradient(135deg, rgba(99,102,241,0.2), rgba(6,182,212,0.1));
+    border-color: rgba(99,102,241,0.4);
+  }
+  .story-price-label { font-size: 11px; color: #64748b; font-weight: 600; margin-bottom: 6px; }
+  .story-price-amount { font-size: 28px; font-weight: 900; color: white; }
+  .story-price-period { font-size: 11px; color: #64748b; margin-top: 2px; }
+  .story-badge-hot {
+    position: absolute;
+    top: -10px; right: 10px;
+    background: linear-gradient(90deg, #f59e0b, #ef4444);
+    font-size: 9px;
+    font-weight: 800;
+    color: white;
+    padding: 3px 8px;
+    border-radius: 100px;
+    letter-spacing: 0.05em;
+  }
+
+  .story-cta {
+    width: 100%;
+    background: linear-gradient(90deg, #6366f1, #06b6d4);
+    border-radius: 16px;
+    padding: 16px;
+    font-size: 15px;
+    font-weight: 800;
+    color: white;
+    text-align: center;
+    margin-bottom: 16px;
+    box-shadow: 0 4px 30px rgba(99,102,241,0.4);
+  }
+
+  .story-contact {
+    font-size: 13px;
+    color: #475569;
+    font-weight: 500;
+  }
+  .story-contact strong { color: #94a3b8; }
+
+  /* Label */
+  .banner-label {
+    font-size: 13px;
+    color: #475569;
+    font-weight: 500;
+    align-self: flex-start;
+  }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+</head>
+<body>
+
+<!-- ════ DOWNLOAD BUTTONS ════ -->
+<div style="display:flex;gap:16px;margin-bottom:8px;">
+  <button onclick="downloadBanner('.banner-fb','banner_facebook_1200x628.png',1200,628)"
+    style="background:linear-gradient(90deg,#6366f1,#06b6d4);border:none;color:white;padding:12px 28px;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">
+    ⬇️ Tải Banner Facebook (1200×628)
+  </button>
+  <button onclick="downloadBanner('.banner-story','banner_story_1080x1920.png',540,960)"
+    style="background:linear-gradient(90deg,#f59e0b,#ef4444);border:none;color:white;padding:12px 28px;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">
+    ⬇️ Tải Banner Story (1080×1920)
+  </button>
+</div>
+
+<script>
+function downloadBanner(selector, filename, w, h) {
+  const el = document.querySelector(selector);
+  const btn = event.target;
+  btn.textContent = '⏳ Đang xử lý...';
+  btn.disabled = true;
+
+  html2canvas(el, {
+    width: w, height: h,
+    scale: 2,           // 2x = ảnh sắc nét hơn
+    useCORS: true,
+    backgroundColor: null,
+    logging: false,
+  }).then(canvas => {
+    const link = document.createElement('a');
+    link.download = filename;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+    btn.textContent = '✅ Đã tải!';
+    setTimeout(() => { btn.textContent = btn.textContent.replace('✅ Đã tải!', selector.includes('fb') ? '⬇️ Tải Banner Facebook (1200×628)' : '⬇️ Tải Banner Story (1080×1920)'); btn.disabled=false; }, 2000);
+  }).catch(e => {
+    alert('Lỗi: ' + e);
+    btn.disabled = false;
+  });
+}
+</script>
+
+<!-- ════ BANNER 1 ════ -->
+<div class="banner-label">📐 Banner Facebook / Zalo Post — 1200 × 628px</div>
+<div class="banner-fb">
+  <div class="grid-overlay"></div>
+
+  <!-- LEFT -->
+  <div class="fb-left">
+    <div class="badge">
+      <div class="badge-dot"></div>
+      <span>🤖 AI-Powered · Tự Động Hoàn Toàn</span>
+    </div>
+
+    <div class="main-title">
+      <div class="line1">Tạo Video Recap</div>
+      <div class="line2">Chỉ Trong Vài Click</div>
+    </div>
+
+    <div class="sub-title">
+      Phần mềm AI tự động review phim — từ video gốc<br>
+      ra thành phẩm có thuyết minh, phụ đề, nhạc nền
+    </div>
+
+    <div class="features">
+      <div class="feat-item">
+        <div class="feat-icon">🎬</div>
+        Tự động nhận diện cảnh phim, tạo kịch bản AI
+      </div>
+      <div class="feat-item">
+        <div class="feat-icon">🎙️</div>
+        13 giọng đọc offline — Ngọc Huyền, Hoài My...
+      </div>
+      <div class="feat-item">
+        <div class="feat-icon">⚡</div>
+        Pipeline tự động từ A→Z, không cần kỹ năng edit
+      </div>
+      <div class="feat-item">
+        <div class="feat-icon">🔒</div>
+        Không lưu API key — bảo mật tuyệt đối
+      </div>
+    </div>
+
+    <div class="pricing-row">
+      <div class="price-card">
+        <div class="price-label">Hàng tháng</div>
+        <div class="price-amount">199K <span>/ tháng</span></div>
+      </div>
+      <div class="price-card hot">
+        <div class="hot-tag">🔥 TIẾT KIỆM NHẤT</div>
+        <div class="price-label">Vĩnh viễn</div>
+        <div class="price-amount">499K <span>/ lifetime</span></div>
+      </div>
+      <div style="padding-left:8px">
+        <div style="font-size:12px;color:#64748b;margin-bottom:6px;font-weight:500">Liên hệ Zalo:</div>
+        <div style="font-size:22px;font-weight:900;color:#6366f1">0839 454 163</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT — App mockup -->
+  <div class="fb-right">
+    <div class="mockup-window">
+      <div class="window-bar">
+        <div class="dot r"></div><div class="dot y"></div><div class="dot g"></div>
+        <div class="window-title">AutoRecapPro V2</div>
+      </div>
+      <div class="window-body">
+        <div class="pip-track">
+          <div class="pip-header">
+            <div class="pip-name">📝 Tạo kịch bản AI</div>
+            <div class="pip-status done">✓ Xong</div>
+          </div>
+          <div class="pip-bar-bg"><div class="pip-bar-fill" style="width:100%"></div></div>
+        </div>
+        <div class="pip-track">
+          <div class="pip-header">
+            <div class="pip-name">🎙️ Tổng hợp giọng đọc</div>
+            <div class="pip-status run">⟳ Đang chạy</div>
+          </div>
+          <div class="pip-bar-bg"><div class="pip-bar-fill" style="width:68%"></div></div>
+        </div>
+        <div class="pip-track">
+          <div class="pip-header">
+            <div class="pip-name">🎬 Render video</div>
+            <div class="pip-status wait">Chờ</div>
+          </div>
+          <div class="pip-bar-bg"><div class="pip-bar-fill" style="width:0%"></div></div>
+        </div>
+        <div class="log-area">
+          <div class="log-line"><span class="log-time">12:31:04</span><span class="log-ok">✅ Nhận diện 147 cảnh phim</span></div>
+          <div class="log-line"><span class="log-time">12:31:09</span><span class="log-ok">✅ Kịch bản AI 2.840 từ</span></div>
+          <div class="log-line"><span class="log-time">12:31:15</span><span class="log-info">🎙️ TTS Ngọc Huyền: 68%...</span></div>
+          <div class="log-line"><span class="log-time">12:31:20</span><span class="log-warn">⏳ Còn ~45 giây...</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════
+     BANNER 2 — Story / Reels 1080×1920
+════════════════════════════════════════════ -->
+<div class="banner-label">📐 Banner Story / Reels — 1080 × 1920px (hiển thị 540×960)</div>
+<div class="banner-story">
+  <div class="story-content">
+    <div class="story-logo">🎬</div>
+    <div class="story-title">
+      AutoRecap<span class="gradient">Pro V2</span>
+    </div>
+    <div class="story-sub">Phần mềm Review Phim AI · Tự Động Hoàn Toàn</div>
+
+    <div class="story-features">
+      <div class="story-feat">
+        <div class="story-feat-icon">🤖</div>
+        <div class="story-feat-text">
+          <div class="story-feat-title">AI Viết Kịch Bản Tự Động</div>
+          <div class="story-feat-desc">Gemini AI phân tích phim, tạo kịch bản review chuyên nghiệp</div>
+        </div>
+      </div>
+      <div class="story-feat">
+        <div class="story-feat-icon">🎙️</div>
+        <div class="story-feat-text">
+          <div class="story-feat-title">13 Giọng Đọc Offline</div>
+          <div class="story-feat-desc">Ngọc Huyền, Hoài My, Nam Minh... không cần internet</div>
+        </div>
+      </div>
+      <div class="story-feat">
+        <div class="story-feat-icon">⚡</div>
+        <div class="story-feat-text">
+          <div class="story-feat-title">Pipeline A→Z Tự Động</div>
+          <div class="story-feat-desc">Từ video gốc ra thành phẩm — không cần kỹ năng edit</div>
+        </div>
+      </div>
+      <div class="story-feat">
+        <div class="story-feat-icon">🎬</div>
+        <div class="story-feat-text">
+          <div class="story-feat-title">Export Trực Tiếp Video</div>
+          <div class="story-feat-desc">Phụ đề, thuyết minh, nhạc nền — render 1 nút bấm</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="story-pricing">
+      <div class="story-price">
+        <div class="story-price-label">HÀNG THÁNG</div>
+        <div class="story-price-amount">199K</div>
+        <div class="story-price-period">/ tháng</div>
+      </div>
+      <div class="story-price featured">
+        <div class="story-badge-hot">🔥 HOT</div>
+        <div class="story-price-label">VĨNH VIỄN</div>
+        <div class="story-price-amount">499K</div>
+        <div class="story-price-period">one-time</div>
+      </div>
+    </div>
+
+    <div class="story-cta">
+      💬 Nhắn Zalo Ngay Để Dùng Thử Miễn Phí
+    </div>
+
+    <div class="story-contact">
+      Zalo / SĐT: <strong>0839 454 163</strong>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

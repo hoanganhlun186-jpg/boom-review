@@ -1,0 +1,15 @@
+﻿customtkinter
+google-generativeai
+google-genai
+edge-tts
+opencv-python
+pillow
+numpy
+pydub
+scipy
+librosa
+ffmpeg-python
+pyperclip
+pyautogui==0.9.54
+curl_cffi>=0.16.0
+PySide6>=6.6,<7
