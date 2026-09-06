@@ -1,92 +1,530 @@
-﻿import customtkinter as ctk
-from tkinter import filedialog, messagebox, Canvas, colorchooser, BooleanVar
-from PIL import Image, ImageDraw, ImageFont, ImageTk
-import threading
-import asyncio
-import os
-import json
-import uuid
-import re
-import shutil
-import cv2
-import numpy as np
-import unicodedata
-import tempfile
-from core.video_engine import VideoEngine
-from core.ai_engine import AIEngine
-from core.script_processor import ScriptProcessor
-from core.video_cutter import VideoCutter
-from core.srt_processor import SRTParser
-from core.calculator import VideoCalculator
-from core.script_generator import ScriptGenerator
-from core.workflow import VideoProcessingWorkflow
-from core.srt_reviewer import SRTReviewer
-from core.capcut_bridge import CapCutIntegration
-from core.auto_workflow import AutoWorkflowHandler
-from core.premium_pipeline import PremiumReviewPipeline
-from core.srt_translator import SRTTranslator
-from core.voice_pipeline_enhanced import EnhancedVoiceProcessingPipeline
-from core.full_pipeline import FullPipeline
-from core.review_styles import normalize_review_style, available_review_styles
-from config import ConfigManager
-import subprocess
-import io
-import webbrowser
-import time
-import sys
-import math
+# Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
+# ─────────────────────────────────────────────────────────────────────────────
+from __future__ import annotations
+import os, sys, json, threading, time, subprocess, webbrowser, asyncio
+import re, shutil, io, math, unicodedata, tempfile
+
+from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageFilter
+from core.preview_design import resize_box, normalized_box, wrap_caption
+
+try:    import cv2
+except: cv2 = None
+try:    import numpy as np
+except: np = None
 try:
     import pyperclip
     PYPERCLIP_AVAILABLE = True
 except ImportError:
     PYPERCLIP_AVAILABLE = False
-    print("⚠️ Warning: pyperclip not installed. Clipboard features disabled.")
+    print("⚠️ pyperclip not installed. Clipboard features disabled.")
 
-# ── Anti-tamper check (đã tắt) ───────────────────────────────────────────────
-# verify_runtime_integrity() bị bỏ qua để app mở thẳng.
-    print("   Install with: pip install pyperclip")
-from utils.helpers import FFmpegUtils
+from PySide6.QtCore  import Qt, QTimer, Signal, QThread, QObject, QSize, QRectF
+from PySide6.QtGui   import (QPixmap, QImage, QColor, QFont as QFontQt,
+                              QPainter, QCursor, QIcon, QClipboard, QTextCursor)
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
+    QLineEdit, QComboBox, QTextEdit, QScrollArea, QSlider, QCheckBox,
+    QHBoxLayout, QVBoxLayout, QGridLayout, QStackedWidget, QSplitter,
+    QSizePolicy, QFileDialog, QMessageBox, QColorDialog, QProgressBar,
+    QDialog, QDialogButtonBox, QGroupBox, QAbstractScrollArea, QSpinBox,
+    QTabWidget,
+)
 
-class App(ctk.CTk):
-    CAPCUT_SRT_AUTO = "Tự động (chạy nền)"
+# ─── Core imports ─────────────────────────────────────────────────────────────
+_core = os.path.dirname(os.path.abspath(__file__))
+if _core not in sys.path:
+    sys.path.insert(0, _core)
+
+VideoEngine = AIEngine = FullPipeline = CapCutIntegration = SRTParser = None
+ConfigManager = EnhancedVoiceProcessingPipeline = SRTTranslator = None
+VideoCutter = ScriptProcessor = VideoCalculator = ScriptGenerator = None
+VideoProcessingWorkflow = SRTReviewer = AutoWorkflowHandler = None
+PremiumReviewPipeline = FFmpegUtils = None
+normalize_review_style = lambda x: x
+available_review_styles = []
+
+for _mod, _attr in [
+    ("core.video_engine",    "VideoEngine"),
+    ("core.ai_engine",       "AIEngine"),
+    ("core.script_processor","ScriptProcessor"),
+    ("core.video_cutter",    "VideoCutter"),
+    ("core.srt_processor",   "SRTParser"),
+    ("core.calculator",      "VideoCalculator"),
+    ("core.script_generator","ScriptGenerator"),
+    ("core.workflow",        "VideoProcessingWorkflow"),
+    ("core.srt_reviewer",    "SRTReviewer"),
+    ("core.capcut_bridge",   "CapCutIntegration"),
+    ("core.auto_workflow",   "AutoWorkflowHandler"),
+    ("core.premium_pipeline","PremiumReviewPipeline"),
+    ("core.srt_translator",  "SRTTranslator"),
+    ("core.voice_pipeline_enhanced","EnhancedVoiceProcessingPipeline"),
+    ("core.full_pipeline",   "FullPipeline"),
+    ("utils.helpers",        "FFmpegUtils"),
+]:
+    try:
+        import importlib
+        m = importlib.import_module(_mod)
+        globals()[_attr] = getattr(m, _attr)
+    except Exception:
+        pass
+
+try:
+    from core.review_styles import normalize_review_style, available_review_styles
+except Exception:
+    pass
+
+try:
+    from config import ConfigManager
+except Exception:
+    pass
+
+# ─── PySide6 helper: PIL → QPixmap ────────────────────────────────────────────
+def _pil_to_qpixmap(pil_img):
+    if pil_img.mode != "RGB":
+        pil_img = pil_img.convert("RGB")
+    w, h = pil_img.size
+    data = pil_img.tobytes()
+    qimg = QImage(data, w, h, 3 * w, QImage.Format_RGB888)
+    return QPixmap.fromImage(qimg)
+
+
+# ─── Compat: BooleanVar / StringVar ───────────────────────────────────────────
+class BooleanVar:
+    def __init__(self, value=False): self._v = bool(value)
+    def get(self): return self._v
+    def set(self, v): self._v = bool(v)
+
+class StringVar:
+    def __init__(self, value=""): self._v = str(value)
+    def get(self): return self._v
+    def set(self, v): self._v = str(v)
+
+
+# ─── Compat widget wrappers ────────────────────────────────────────────────────
+
+class _CompatMixin:
+    """Shared CTk-compatible helpers."""
+    def pack(self, **kw):   pass
+    def place(self, **kw):  pass
+    def lift(self):         pass
+    def pack_propagate(self, *a): pass
+    def bind(self, event, callback, add=""):
+        """Map common tkinter events to Qt signals (override per subclass)."""
+        pass
+
+    def _qss_color(self, color):
+        if not color or color == "transparent":
+            return None
+        return color  # assume valid CSS color string
+
+    def _apply_qss(self, fg_color=None, text_color=None, bg=None):
+        parts = []
+        c = self._qss_color(fg_color or bg)
+        if c:  parts.append(f"background-color:{c}")
+        if text_color: parts.append(f"color:{text_color}")
+        if parts:
+            self.setStyleSheet(";".join(parts))
+
+    def _apply_font(self, font_spec):
+        if not font_spec or not isinstance(font_spec, (tuple, list)):
+            return
+        family = font_spec[0] if len(font_spec) > 0 else "Segoe UI"
+        size   = font_spec[1] if len(font_spec) > 1 else 11
+        bold   = len(font_spec) > 2 and "bold" in str(font_spec[2]).lower()
+        qf = QFontQt(family, size)
+        qf.setBold(bold)
+        self.setFont(qf)
+
+
+class QLabel_CTK(QLabel, _CompatMixin):
+    def __init__(self, parent=None, text="", font=None, text_color=None,
+                 fg_color=None, width=0, height=0, anchor="w",
+                 wraplength=0, justify="left", corner_radius=0, cursor="", **kw):
+        super().__init__(text, parent)
+        self._apply_qss(fg_color, text_color)
+        self._apply_font(font)
+        self._set_anchor(anchor)
+        if wraplength: self.setWordWrap(True)
+        if width:  self.setFixedWidth(width)
+        if height: self.setFixedHeight(height)
+
+    def _set_anchor(self, anchor):
+        am = {"w": Qt.AlignLeft, "center": Qt.AlignHCenter, "e": Qt.AlignRight,
+              "nw": Qt.AlignLeft, "n": Qt.AlignHCenter, "ne": Qt.AlignRight}
+        self.setAlignment(am.get(anchor, Qt.AlignLeft) | Qt.AlignVCenter)
+
+    def configure(self, text=None, text_color=None, fg_color=None, font=None,
+                  anchor=None, wraplength=0, **kw):
+        if text is not None:      self.setText(str(text))
+        if text_color or fg_color: self._apply_qss(fg_color, text_color)
+        if font:                  self._apply_font(font)
+        if anchor:                self._set_anchor(anchor)
+        if wraplength:            self.setWordWrap(True)
+
+    def winfo_exists(self): return True
+
+
+class QPushButton_CTK(QPushButton, _CompatMixin):
+    def __init__(self, parent=None, text="", command=None, width=0, height=28,
+                 font=None, fg_color=None, hover_color=None, text_color=None,
+                 corner_radius=0, state="normal", cursor="hand2", **kw):
+        super().__init__(text, parent)
+        if command: self.clicked.connect(command)
+        self._apply_qss(fg_color, text_color)
+        self._apply_font(font)
+        if width:  self.setFixedWidth(width)
+        if height: self.setFixedHeight(height)
+        if state == "disabled": self.setEnabled(False)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+
+    def configure(self, text=None, state=None, fg_color=None, text_color=None,
+                  font=None, hover_color=None, **kw):
+        if text is not None: self.setText(str(text))
+        if fg_color or text_color: self._apply_qss(fg_color, text_color)
+        if font:  self._apply_font(font)
+        if state == "disabled": self.setEnabled(False)
+        if state in ("normal", "active"): self.setEnabled(True)
+
+
+class QLineEdit_CTK(QLineEdit, _CompatMixin):
+    def __init__(self, parent=None, placeholder_text="", width=0, show=None, **kw):
+        super().__init__(parent)
+        if placeholder_text: self.setPlaceholderText(placeholder_text)
+        if width: self.setFixedWidth(width)
+        if show:  self.setEchoMode(QLineEdit.Password)
+
+    def get(self): return self.text()
+    def insert(self, pos, text):
+        if pos == 0: self.setText(str(text))
+        else:        self.setText(self.text() + str(text))
+    def delete(self, start, end): self.clear()
+    def see(self, *a): pass
+
+    def configure(self, state=None, **kw):
+        if state == "disabled": self.setEnabled(False)
+        if state in ("normal", "active"): self.setEnabled(True)
+
+    def bind(self, event, callback, **kw):
+        if event == "<KeyRelease>":
+            self.textChanged.connect(lambda _t, cb=callback: cb(None))
+        elif event in ("<FocusOut>", "<Return>"):
+            self.editingFinished.connect(lambda cb=callback: cb(None))
+        elif event == "<Button-1>":
+            # not trivial — skip; caller can connect separately
+            pass
+
+    def winfo_exists(self): return True
+
+
+class QComboBox_CTK(QComboBox, _CompatMixin):
+    def __init__(self, parent=None, values=None, state="readonly", width=0,
+                 command=None, variable=None, **kw):
+        super().__init__(parent)
+        if values: self.addItems(values)
+        self.setEditable(False)
+        if width: self.setFixedWidth(width)
+        if command: self.currentTextChanged.connect(command)
+        self._command = command
+
+    def get(self): return self.currentText()
+    def set(self, text): self.setCurrentText(str(text))
+
+    def configure(self, values=None, state=None, command=None, **kw):
+        if values is not None:
+            self.clear(); self.addItems(values)
+        if state == "disabled": self.setEnabled(False)
+        if command and command is not self._command:
+            self.currentTextChanged.connect(command)
+            self._command = command
+
+    def bind(self, event, callback, **kw): pass
+    def winfo_exists(self): return True
+
+
+class QTextEdit_CTK(QTextEdit, _CompatMixin):
+    def __init__(self, parent=None, height=100, fg_color=None, border_color=None,
+                 border_width=0, font=None, **kw):
+        super().__init__(parent)
+        self._apply_qss(fg_color)
+        self._apply_font(font)
+        if height: self.setFixedHeight(height)
+
+    def insert(self, pos, text):
+        self.moveCursor(QTextCursor.MoveOperation.End)
+        self.insertPlainText(str(text))
+
+    def see(self, pos):
+        sb = self.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def configure(self, **kw): pass
+    def winfo_exists(self): return True
+
+
+class QSlider_CTK(QSlider, _CompatMixin):
+    def __init__(self, parent=None, from_=0, to=100, number_of_steps=100,
+                 command=None, **kw):
+        super().__init__(Qt.Horizontal, parent)
+        self.setRange(int(from_), int(to))
+        self._scale = 1.0
+        if command:
+            self.valueChanged.connect(lambda v, cb=command: cb(float(v)))
+
+    def get(self): return float(self.value())
+    def set(self, val): self.setValue(int(val))
+    def configure(self, command=None, **kw):
+        if command:
+            self.valueChanged.connect(lambda v, cb=command: cb(float(v)))
+
+
+class QCheckBox_CTK(QCheckBox, _CompatMixin):
+    def __init__(self, parent=None, text="", variable=None, command=None, **kw):
+        super().__init__(text, parent)
+        self._var = variable
+        if variable is not None:
+            self.setChecked(bool(variable.get()))
+        # Cập nhật biến TRƯỚC, rồi mới gọi command — tránh lỗi đảo ngược checkbox
+        if variable is not None:
+            self.stateChanged.connect(lambda s, v=variable: v.set(bool(s)))
+        if command:
+            self.stateChanged.connect(lambda s, cmd=command: cmd())
+
+    def configure(self, **kw): pass
+    def bind(self, event, callback, **kw): pass
+
+
+# ─── Tkinter shims ────────────────────────────────────────────────────────────
+
+class messagebox:
+    _app = None
+    @classmethod
+    def _w(cls): return None
+    @staticmethod
+    def showinfo(title, msg, **kw):
+        QMessageBox.information(None, title, str(msg))
+    @staticmethod
+    def showerror(title, msg, **kw):
+        QMessageBox.critical(None, title, str(msg))
+    @staticmethod
+    def showwarning(title, msg, **kw):
+        QMessageBox.warning(None, title, str(msg))
+    @staticmethod
+    def askyesno(title, msg, **kw):
+        r = QMessageBox.question(None, title, str(msg),
+                                 QMessageBox.Yes | QMessageBox.No)
+        return r == QMessageBox.Yes
+    @staticmethod
+    def askyesnocancel(title, msg, **kw):
+        r = QMessageBox.question(None, title, str(msg),
+                                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+        if r == QMessageBox.Yes: return True
+        if r == QMessageBox.No:  return False
+        return None
+    @staticmethod
+    def askokcancel(title, msg, **kw):
+        r = QMessageBox.question(None, title, str(msg),
+                                 QMessageBox.Ok | QMessageBox.Cancel)
+        return r == QMessageBox.Ok
+
+
+class filedialog:
+    @staticmethod
+    def askopenfilename(title="", filetypes=None, **kw):
+        flt = _build_filter(filetypes)
+        path, _ = QFileDialog.getOpenFileName(None, title, "", flt)
+        return path
+    @staticmethod
+    def askopenfilenames(title="", filetypes=None, **kw):
+        flt = _build_filter(filetypes)
+        paths, _ = QFileDialog.getOpenFileNames(None, title, "", flt)
+        return paths
+    @staticmethod
+    def askdirectory(title="", **kw):
+        return QFileDialog.getExistingDirectory(None, title, "")
+    @staticmethod
+    def asksaveasfilename(title="", filetypes=None, defaultextension="", **kw):
+        flt = _build_filter(filetypes)
+        path, _ = QFileDialog.getSaveFileName(None, title, "", flt)
+        return path
+
+
+def _build_filter(filetypes):
+    if not filetypes:
+        return "All Files (*.*)"
+    parts = []
+    for item in filetypes:
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            name, ext = item
+            parts.append(f"{name} ({ext})")
+        else:
+            parts.append(str(item))
+    return ";;".join(parts) or "All Files (*.*)"
+
+
+class colorchooser:
+    @staticmethod
+    def askcolor(color=None, title="", **kw):
+        initial = QColor()
+        if color:
+            if isinstance(color, (tuple, list)) and len(color) >= 3:
+                initial = QColor(int(color[0]), int(color[1]), int(color[2]))
+            elif isinstance(color, str):
+                initial = QColor(color)
+        c = QColorDialog.getColor(initial, None, title)
+        if c.isValid():
+            r, g, b = c.red(), c.green(), c.blue()
+            return ((r, g, b), f"#{r:02x}{g:02x}{b:02x}")
+        return (None, None)
+
+
+class Canvas_CTK(QLabel, _CompatMixin):
+    """Drop-in canvas for preview — renders PIL composite as QPixmap."""
+    def __init__(self, parent=None, bg="black", width=440, height=480,
+                 highlightthickness=0, **kw):
+        super().__init__(parent)
+        self.setFixedSize(width, height)
+        self.setStyleSheet(f"background-color:{bg};")
+        self.setAlignment(Qt.AlignCenter)
+        self.setMouseTracking(True)
+        self._press_cb = self._drag_cb = self._release_cb = self._wheel_cb = None
+        self._img_holder = None
+
+    def _image_event(self, ev):
+        pixmap = self.pixmap()
+        ox = max(0, (self.width()-pixmap.width())/2) if pixmap and not pixmap.isNull() else 0
+        oy = max(0, (self.height()-pixmap.height())/2) if pixmap and not pixmap.isNull() else 0
+        return _TkEv(ev.position().x()-ox, ev.position().y()-oy)
+
+    def bind(self, event, callback, **kw):
+        if event == "<Button-1>":         self._press_cb   = callback
+        elif event == "<B1-Motion>":      self._drag_cb    = callback
+        elif event == "<ButtonRelease-1>": self._release_cb = callback
+        elif event == "<MouseWheel>":     self._wheel_cb   = callback
+
+    def delete(self, what): pass
+    def configure(self, **kw): pass
+
+    def create_image(self, x, y, image=None, anchor="nw"):
+        if isinstance(image, _PhotoImage):
+            self.setPixmap(image._px)
+        elif isinstance(image, QPixmap):
+            self.setPixmap(image)
+        self._img_holder = image
+
+    def mousePressEvent(self, ev):
+        if self._press_cb: self._press_cb(self._image_event(ev))
+    def mouseMoveEvent(self, ev):
+        if self._drag_cb and (ev.buttons() & Qt.LeftButton):
+            self._drag_cb(self._image_event(ev))
+    def mouseReleaseEvent(self, ev):
+        if self._release_cb: self._release_cb(self._image_event(ev))
+    def wheelEvent(self, ev):
+        if self._wheel_cb:
+            point = self._image_event(ev)
+            self._wheel_cb(_TkWheelEv(point.x, point.y,
+                                       ev.angleDelta().y()))
+
+
+class _TkEv:
+    def __init__(self, x, y): self.x = x; self.y = y
+class _TkWheelEv:
+    def __init__(self, x, y, delta): self.x = x; self.y = y; self.delta = delta
+
+
+class _PhotoImage:
+    """Compat holder so canvas.create_image(image=photo) works."""
+    def __init__(self, pil_img):
+        self._px = _pil_to_qpixmap(pil_img)
+
+
+# Alias so existing code using ImageTk.PhotoImage() still works
+class _ImageTk:
+    PhotoImage = _PhotoImage
+ImageTk = _ImageTk()
+
+
+# ─── Tab scroll container ──────────────────────────────────────────────────────
+class TabScrollArea(QScrollArea):
+    """Scrollable tab content area; supports CTk .container pattern."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._inner = QWidget()
+        self._layout = QVBoxLayout(self._inner)
+        self._layout.setContentsMargins(8, 6, 8, 6)
+        self._layout.setSpacing(2)
+        self._layout.addStretch(1)
+        self.setWidget(self._inner)
+        self.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+
+    def _add(self, widget):
+        self._layout.insertWidget(self._layout.count() - 1, widget)
+
+    def lift(self):
+        p = self.parent()
+        while p:
+            if isinstance(p, QStackedWidget):
+                p.setCurrentWidget(self)
+                return
+            p = p.parent()
+
+    def pack(self, **kw): pass
+    def pack_propagate(self, *a): pass
+    def place(self, **kw): pass
+
+    # Make it behave like a "container" for create_label / create_entry helpers
+    @property
+    def winfo_children(self):
+        return lambda: []
+
+
+# ─── Dark theme stylesheet ────────────────────────────────────────────────────
+DARK_QSS = """
+QMainWindow, QWidget { background:#0a0a14; color:#e2e8f0; font-family:"Segoe UI"; }
+QLabel  { color:#e2e8f0; }
+QLineEdit, QComboBox, QTextEdit, QSpinBox {
+    background:#16213e; color:#e2e8f0; border:1px solid #1e293b;
+    border-radius:4px; padding:3px 6px; selection-background-color:#4f46e5;
+}
+QComboBox::drop-down { border:none; }
+QComboBox::down-arrow { color:#e2e8f0; }
+QPushButton {
+    background:#1e293b; color:#e2e8f0; border:none; border-radius:6px;
+    padding:4px 10px;
+}
+QPushButton:hover  { background:#334155; }
+QPushButton:disabled { background:#0f172a; color:#475569; }
+QScrollBar:vertical { background:#0d0d1f; width:8px; }
+QScrollBar::handle:vertical { background:#334155; border-radius:4px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+QSlider::groove:horizontal { background:#1e293b; height:4px; border-radius:2px; }
+QSlider::handle:horizontal { background:#6366f1; width:12px; height:12px; border-radius:6px; margin:-4px 0; }
+QCheckBox::indicator { width:16px; height:16px; border:1px solid #475569; border-radius:3px; }
+QCheckBox::indicator:checked { background:#6366f1; }
+QProgressBar { background:#1e293b; border:none; border-radius:4px; height:8px; }
+QProgressBar::chunk { background:#6366f1; border-radius:4px; }
+QTabWidget::pane { border:1px solid #1e293b; }
+QTabBar::tab { background:#0d0d1f; color:#64748b; padding:6px 14px; border-radius:0; }
+QTabBar::tab:selected { background:#1e293b; color:#a5b4fc; }
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  App — PySide6 port
+# ─────────────────────────────────────────────────────────────────────────────
+from ui.preview_editor import PreviewEditorMixin
+from ui.graphics_preview import GraphicsPreview
+
+
+class App(PreviewEditorMixin, QMainWindow):
+    CAPCUT_SRT_AUTO   = "CapCut tự động (chạy nền)"
     CAPCUT_SRT_MANUAL = "Thủ công (mở CapCut)"
 
-    # ── Device fingerprint helpers ─────────────────────────────────────────────
-    _DEVICE_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capcut_device.json")
-
-    def _load_capcut_device(self) -> dict:
-        """Đọc device fingerprint từ file; tạo mới nếu chưa có."""
-        if os.path.exists(self._DEVICE_CONFIG):
-            try:
-                with open(self._DEVICE_CONFIG, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if data.get("device_id") and data.get("iid"):
-                    return data
-            except Exception:
-                pass
-        return self._generate_capcut_device()
-
-    def _generate_capcut_device(self) -> dict:
-        """Tạo device fingerprint mới ngẫu nhiên và lưu."""
-        did = str(uuid.uuid4().int)[:19]
-        iid = str(uuid.uuid4().int)[:19]
-        device = {"device_id": did, "iid": iid, "tdid": did, "appvr": "4.1.0", "region": "us", "lan": "en"}
-        try:
-            with open(self._DEVICE_CONFIG, "w", encoding="utf-8") as f:
-                json.dump(device, f, indent=2)
-        except Exception as e:
-            print(f"[Device] Không lưu được: {e}")
-        return device
-
-    def _refresh_device_label(self):
-        if hasattr(self, "_lbl_device_info"):
-            d = self._load_capcut_device()
-            self._lbl_device_info.configure(
-                text=f"device_id: {d['device_id'][:12]}...  iid: {d['iid'][:12]}..."
-            )
+    # Thread-safe UI signal
+    _ui_call = Signal(object)   # carries a callable()
 
     def _apply_app_icon(self):
-        """Apply the branded icon in source and Nuitka ONEDIR builds."""
         bases = [
             os.path.dirname(os.path.abspath(__file__)),
             os.path.dirname(os.path.abspath(sys.executable)),
@@ -94,105 +532,195 @@ class App(ctk.CTk):
         ]
         seen = set()
         for base_dir in bases:
-            normalized = os.path.normcase(os.path.abspath(base_dir))
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            ico_path = os.path.join(base_dir, "assets", "app_icon.ico")
-            png_path = os.path.join(base_dir, "assets", "app_icon.png")
+            norm = os.path.normcase(os.path.abspath(base_dir))
+            if norm in seen: continue
+            seen.add(norm)
+            ico = os.path.join(base_dir, "assets", "app_icon.ico")
+            png = os.path.join(base_dir, "assets", "app_icon.png")
+            boom_ico = os.path.join(base_dir, "assets", "boom_icon.ico")
             try:
-                if os.path.isfile(ico_path):
-                    self.iconbitmap(ico_path)
-                if os.path.isfile(png_path):
-                    self._app_icon_photo = ImageTk.PhotoImage(Image.open(png_path))
-                    self.iconphoto(True, self._app_icon_photo)
-                if os.path.isfile(ico_path) or os.path.isfile(png_path):
+                if os.path.isfile(boom_ico):
+                    self.setWindowIcon(QIcon(boom_ico))
+                    return
+                if os.path.isfile(ico):
+                    self.setWindowIcon(QIcon(ico))
+                    return
+                if os.path.isfile(png):
+                    self.setWindowIcon(QIcon(png))
                     return
             except Exception:
                 continue
 
     def __init__(self):
-        # ── SL6 Theme ─────────────────────────────────────────────────────
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("dark-blue")
         super().__init__()
+        self._ui_call.connect(lambda fn: fn(), Qt.QueuedConnection)
+
         try:
             from engine.updater import get_current_version
             app_version = get_current_version()
         except Exception:
             app_version = "2.0.0"
-        self.title(f"Auto Recap Pro V2 v{app_version} - AI Smart Title & Layout")
+
+        self.setWindowTitle(f"BOOM Review v1.0.0 - AI Tự Động Review Phim")
+        self.resize(1400, 950)
+        self.setStyleSheet(DARK_QSS)
         self._apply_app_icon()
-        self.after(250, self._apply_app_icon)
-        self.geometry("1400x950")
-        # Override màu nền chính sang SL6 style (xám than đậm)
-        self.configure(fg_color="#0a0a14")
 
-        # ── ROOT LAYOUT: sidebar | body ──────────────────────────────────────
-        root_frame = ctk.CTkFrame(self, fg_color="#0a0a14", corner_radius=0)
-        root_frame.pack(fill="both", expand=True)
+        # ── Preview / logo / delogo state vars ───────────────────────────────
+        self.preview_image       = None
+        self.preview_source_size = (0, 0)
+        self.preview_frame_box   = (0, 0, 0, 0)
+        self.preview_scale       = 1.0
+        self.current_video_path  = None
 
-        # ── SIDEBAR (trái, icon) ──────────────────────────────────────────────
-        sidebar = ctk.CTkFrame(root_frame, width=60, fg_color="#0d0d1f", corner_radius=0)
-        sidebar.pack(side="left", fill="y")
-        sidebar.pack_propagate(False)
+        self.header_x, self.header_y = 190, 80
+        self.footer_x, self.footer_y = 190, 520
+        self.dragging = None
 
-        # App logo/avatar
-        ctk.CTkLabel(sidebar, text="R", font=("Segoe UI", 18, "bold"),
-                     width=44, height=44, fg_color="#6366f1", corner_radius=8,
-                     text_color="white").pack(pady=(14, 20))
+        self.header_color     = (255, 255, 0)
+        self.footer_color     = (255, 255, 255)
+        self.header_bar_color = (255, 0, 0)
+        self.footer_bar_color = (0, 174, 255)
 
-        def _sb_btn(icon, label, cmd=None):
-            f = ctk.CTkFrame(sidebar, fg_color="transparent", cursor="hand2")
-            f.pack(fill="x", pady=2, padx=6)
-            ctk.CTkLabel(f, text=icon, font=("Segoe UI", 18), width=44, height=38,
-                         fg_color="transparent", text_color="#94a3b8").pack()
-            ctk.CTkLabel(f, text=label, font=("Segoe UI", 8),
-                         text_color="#64748b").pack()
-            if cmd:
-                f.bind("<Button-1>", lambda e: cmd())
+        self.header_font_size = 80
+        self.footer_font_size = 60
+
+        self.logo_path_var    = ""
+        self.logo_corner_var  = "top-right"
+        self.logo_size_pct_var = 10
+        self.logo_x_ratio     = 0.85
+        self.logo_y_ratio     = 0.05
+        self._dragging_logo   = False
+        self._logo_drag_start = None
+        self._logo_canvas_rect = None
+
+        self.delogo_enabled    = False
+        self.delogo_boxes      = [{"x": 0.1, "y": 0.75, "w": 0.8, "h": 0.12}]
+        self.delogo_region     = self.delogo_boxes[0]
+        self._dragging_delogo  = False
+        self._dragging_delogo_idx = 0
+        self._dragging_delogo_handle = "move"
+        self._delogo_drag_start = None
+
+        self._vplay_cap         = None
+        self._vplay_running     = False
+        self._vplay_paused      = True
+        self._vplay_frame_idx   = 0
+        self._vplay_total_frames = 0
+
+        self.burn_srt_enabled   = False
+        self.burn_srt_path_var  = ""
+        self.burn_sub_fontsize_var = 36
+        self.burn_sub_color_var = "white"
+        self.burn_sub_outline_var = 2
+        self.burn_sub_font_var = 'Arial'
+        self.burn_sub_background_var = True
+        self.burn_sub_background_color_var = '#000000'
+        self.burn_sub_background_opacity_var = 70
+        self.burn_sub_x_ratio = 0.5
+        self.burn_sub_y_ratio = 0.78
+        self._sub_canvas_rect = None
+        self._sub_drag_start = None
+        self._preview_seconds = 0.0
+        self._preview_cues_cache = (None, [])
+
+        self.voice_intro_path   = None
+        self.source_srt_path    = ""
+        self.capcut_srt_output_path = ""
+        self._gemini_login_running  = False
+        self._fp_step_labels = {}
+        self._fp_skip_transcript = BooleanVar(value=False)
+        self._fp_skip_scene      = BooleanVar(value=False)
+        self._fp_skip_kf         = BooleanVar(value=False)
+
+        self.auto_workflow_enabled = BooleanVar(value=False)
+        self.workflow_enabled      = BooleanVar(value=True)
+        self._full_pipeline_mode   = BooleanVar(value=True)
+
+        # ── Build UI ─────────────────────────────────────────────────────────
+        self._build_ui()
+        self._load_saved_config()
+        self.update_preview()
+        self.after(300, self._refresh_gemini_web_login_status)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  UI construction
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Sidebar (left 60px) ───────────────────────────────────────────────
+        sidebar = QWidget()
+        sidebar.setFixedWidth(60)
+        sidebar.setStyleSheet("background:#0d0d1f;")
+        sb_lay = QVBoxLayout(sidebar)
+        sb_lay.setContentsMargins(0, 0, 0, 0)
+        sb_lay.setSpacing(0)
+
+        logo_lbl = QLabel("R")
+        logo_lbl.setAlignment(Qt.AlignCenter)
+        logo_lbl.setFixedSize(44, 44)
+        logo_lbl.setStyleSheet("background:#6366f1;color:white;font-size:18px;font-weight:bold;border-radius:8px;")
+        sb_lay.addSpacing(14)
+        sb_wrap = QWidget(); wl = QHBoxLayout(sb_wrap); wl.setContentsMargins(8,0,8,0); wl.addWidget(logo_lbl)
+        sb_lay.addWidget(sb_wrap)
+        sb_lay.addSpacing(20)
+
+        def _sb_btn(icon, label):
+            f = QWidget()
+            fl = QVBoxLayout(f); fl.setContentsMargins(2,2,2,2); fl.setSpacing(0)
+            il = QLabel(icon); il.setAlignment(Qt.AlignCenter); il.setStyleSheet("color:#94a3b8;font-size:18px;")
+            ll = QLabel(label); ll.setAlignment(Qt.AlignCenter); ll.setStyleSheet("color:#64748b;font-size:8px;")
+            fl.addWidget(il); fl.addWidget(ll)
+            sb_lay.addWidget(f)
             return f
 
-        self._sb_project  = _sb_btn("📁", "Dự án")
-        self._sb_library  = _sb_btn("📚", "Thư viện")
-        self._sb_settings = _sb_btn("⚙️", "Cài đặt")
-
-        # Trợ giúp xuống cuối sidebar
-        ctk.CTkFrame(sidebar, fg_color="#1e293b", height=1).pack(fill="x", pady=6, padx=6)
+        _sb_btn("📁", "Dự án")
+        _sb_btn("📚", "Thư viện")
+        _sb_btn("⚙️", "Cài đặt")
+        sb_lay.addStretch()
+        sep = QFrame(); sep.setFrameShape(QFrame.HLine); sep.setStyleSheet("color:#1e293b;"); sb_lay.addWidget(sep)
         _sb_btn("❓", "Trợ giúp")
+        sb_lay.addSpacing(10)
+        root.addWidget(sidebar)
 
-        # ── BODY (phải sidebar): header + content + bottom bar ────────────────
-        body = ctk.CTkFrame(root_frame, fg_color="#0a0a14", corner_radius=0)
-        body.pack(side="left", fill="both", expand=True)
+        # ── Body (right of sidebar) ───────────────────────────────────────────
+        body = QWidget()
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(0)
+        root.addWidget(body, 1)
 
-        # ── HEADER BAR (app title + project status) ───────────────────────────
-        header_bar = ctk.CTkFrame(body, fg_color="#0d0d1f", height=52, corner_radius=0)
-        header_bar.pack(fill="x")
-        header_bar.pack_propagate(False)
-        ctk.CTkLabel(header_bar, text="Auto Recap Pro V2",
-                     font=("Segoe UI", 14, "bold"), text_color="#e2e8f0").pack(side="left", padx=16, pady=6)
-        ctk.CTkLabel(header_bar, text="AI Smart Title & Layout",
-                     font=("Segoe UI", 10), text_color="#475569").pack(side="left")
-        self.license_status_label = ctk.CTkLabel(
-            header_bar, text="Dự án chưa lưu",
-            font=("Segoe UI", 10), text_color="#64748b", anchor="e")
-        self.license_status_label.pack(side="right", padx=16)
+        # Header bar
+        hdr = QWidget(); hdr.setFixedHeight(52); hdr.setStyleSheet("background:#0d0d1f;")
+        hdr_lay = QHBoxLayout(hdr); hdr_lay.setContentsMargins(16, 6, 16, 6)
+        QLabel("BOOM Review", hdr,
+               styleSheet="color:#e2e8f0;font-size:14px;font-weight:bold;").setParent(hdr)
+        hl1 = QHBoxLayout()
+        lbl_title = QLabel("BOOM Review")
+        lbl_title.setStyleSheet("color:#e2e8f0;font-size:14px;font-weight:bold;")
+        lbl_sub   = QLabel("v1.0.0 — AI Tự Động Review Phim")
+        lbl_sub.setStyleSheet("color:#475569;font-size:10px;")
+        hdr_lay.addWidget(lbl_title)
+        hdr_lay.addWidget(lbl_sub)
+        hdr_lay.addStretch()
+        self.license_status_label = QLabel_CTK(text="Dự án chưa lưu")
+        self.license_status_label.setStyleSheet("color:#64748b;font-size:10px;")
+        hdr_lay.addWidget(self.license_status_label)
+        body_lay.addWidget(hdr)
 
-        # ── TAB BAR ───────────────────────────────────────────────────────────
-        tab_bar = ctk.CTkFrame(body, fg_color="#111827", height=42, corner_radius=0)
-        tab_bar.pack(fill="x")
-        tab_bar.pack_propagate(False)
-
-        self._tab_frames = {}
-        self._tab_btns   = {}
-        self._active_tab = None
-
-        def _switch_tab(name):
-            self._tab_frames[name].lift()
-            for n, b in self._tab_btns.items():
-                b.configure(fg_color="#1e293b" if n == name else "transparent",
-                            text_color="#a5b4fc" if n == name else "#64748b")
-            self._active_tab = name
+        # Tab bar
+        tab_bar = QWidget(); tab_bar.setFixedHeight(42); tab_bar.setStyleSheet("background:#111827;")
+        tab_bar_lay = QHBoxLayout(tab_bar); tab_bar_lay.setContentsMargins(4, 0, 4, 0); tab_bar_lay.setSpacing(2)
+        self._tab_frames: dict[str, TabScrollArea] = {}
+        self._tab_btns:   dict[str, QPushButton] = {}
+        self._active_tab: str | None = None
+        self._tab_stack = QStackedWidget()
+        self._tab_stack_idx: dict[str, int] = {}
 
         tab_defs = [
             ("du_an",    "📂  1. Dự án"),
@@ -200,114 +728,135 @@ class App(ctk.CTk):
             ("style",    "🎨  3. Style & Giọng đọc"),
         ]
         for key, label in tab_defs:
-            b = ctk.CTkButton(tab_bar, text=label,
-                              font=("Segoe UI", 11), height=42,
-                              fg_color="transparent", hover_color="#1e293b",
-                              text_color="#64748b", corner_radius=0,
-                              command=lambda k=key: _switch_tab(k))
-            b.pack(side="left", padx=2)
-            self._tab_btns[key] = b
+            tab_w = TabScrollArea()
+            idx = self._tab_stack.addWidget(tab_w)
+            self._tab_frames[key] = tab_w
+            self._tab_stack_idx[key] = idx
+            btn = QPushButton(label)
+            btn.setFixedHeight(42)
+            btn.setStyleSheet("background:transparent;color:#64748b;border:none;border-radius:0;padding:0 8px;font-size:11px;")
+            btn.clicked.connect(lambda _=False, k=key: self._switch_tab(k))
+            self._tab_btns[key] = btn
+            tab_bar_lay.addWidget(btn)
+        tab_bar_lay.addStretch()
+        body_lay.addWidget(tab_bar)
 
-        # ── CONTENT AREA (tabs + preview side by side) ────────────────────────
-        content_area = ctk.CTkFrame(body, fg_color="#0a0a14", corner_radius=0)
-        content_area.pack(fill="both", expand=True)
+        # Content area: tabs + right preview
+        content = QWidget()
+        content_lay = QHBoxLayout(content); content_lay.setContentsMargins(0,0,0,0); content_lay.setSpacing(0)
+        content_lay.addWidget(self._tab_stack, 1)
+        body_lay.addWidget(content, 1)
 
-        # Tab container (trái)
-        tab_container = ctk.CTkFrame(content_area, fg_color="#0a0a14", corner_radius=0)
-        tab_container.pack(side="left", fill="both", expand=True)
+        # Right preview panel (470px)
+        right_frame = QWidget(); right_frame.setFixedWidth(470)
+        right_frame.setStyleSheet("background:#0d0d1f;")
+        right_lay = QVBoxLayout(right_frame); right_lay.setContentsMargins(8, 8, 8, 8); right_lay.setSpacing(4)
+        content_lay.addWidget(right_frame)
 
-        # Tạo 3 scrollable frames chồng lên nhau — dùng place để lift() hoạt động
-        tab_container.update_idletasks()
-        for key, _ in tab_defs:
-            f = ctk.CTkScrollableFrame(tab_container, fg_color="#0a0a14",
-                                        scrollbar_button_color="#334155")
-            f.place(relx=0, rely=0, relwidth=1, relheight=1)
-            self._tab_frames[key] = f
+        preview_title = QLabel("● PREVIEW")
+        preview_title.setStyleSheet("color:#6366f1;font-size:11px;font-weight:bold;")
+        right_lay.addWidget(preview_title)
 
-        # RIGHT: Preview
-        right_frame = ctk.CTkFrame(content_area, width=470, fg_color="#0d0d1f", corner_radius=0)
-        right_frame.pack(side="right", fill="y")
-        right_frame.pack_propagate(False)
+        self.preview_canvas = GraphicsPreview(right_frame)
+        right_lay.addWidget(self.preview_canvas, 1)
 
-        # ── BOTTOM BAR ────────────────────────────────────────────────────────
-        bottom_bar = ctk.CTkFrame(body, fg_color="#0d0d1f", height=48, corner_radius=0)
-        bottom_bar.pack(fill="x", side="bottom")
-        bottom_bar.pack_propagate(False)
+        # Mini player
+        vplay_row = QWidget(); vplay_row.setStyleSheet("background:#111827;")
+        vplay_lay = QHBoxLayout(vplay_row); vplay_lay.setContentsMargins(4,2,4,2)
+        self._vplay_btn = QPushButton_CTK(text="▶ Play", width=70, height=26,
+                                          fg_color="#1e3a5f", command=self._toggle_vplay)
+        self._vplay_slider = QSlider_CTK(from_=0, to=1000, number_of_steps=1000,
+                                         command=self._on_vplay_scrub)
+        vplay_lay.addWidget(self._vplay_btn); vplay_lay.addWidget(self._vplay_slider, 1)
+        self._preview_audio_checkbox = QCheckBox("Âm thanh")
+        self._preview_audio_checkbox.setChecked(True)
+        self._preview_audio_checkbox.toggled.connect(self._preview_audio_changed)
+        vplay_lay.addWidget(self._preview_audio_checkbox)
+        right_lay.addWidget(vplay_row)
 
-        # Status dot + text
-        status_dot = ctk.CTkLabel(bottom_bar, text="●", font=("Segoe UI", 10),
-                                   text_color="#22c55e")
-        status_dot.pack(side="left", padx=(12, 2), pady=14)
-        self._status_label = ctk.CTkLabel(bottom_bar, text="Sẵn sàng",
-                                          font=("Segoe UI", 10), text_color="#94a3b8")
-        self._status_label.pack(side="left")
-        ctk.CTkLabel(bottom_bar, text="|", text_color="#334155").pack(side="left", padx=8)
+        edit_row = QHBoxLayout()
+        for label, callback in [("＋ Logo", self._preview_choose_logo),
+                                ("＋ Sub", self._preview_choose_srt),
+                                ("＋ Mờ che sub cũ", self._preview_add_blur)]:
+            button = QPushButton(label)
+            button.clicked.connect(callback)
+            edit_row.addWidget(button)
+        right_lay.addLayout(edit_row)
+        self._preview_time_label = QLabel("00:00 / 00:00")
+        right_lay.addWidget(self._preview_time_label)
 
-        # Log + Script Editor buttons (bottom)
-        ctk.CTkButton(bottom_bar, text="📋 Xem log", width=90, height=32,
-                      fg_color="transparent", hover_color="#1e293b",
-                      text_color="#94a3b8", font=("Segoe UI", 10),
-                      command=lambda: _switch_tab("du_an")).pack(side="left", padx=4)
-        ctk.CTkButton(bottom_bar, text="✏️ Script Editor", width=110, height=32,
-                      fg_color="transparent", hover_color="#1e293b",
-                      text_color="#94a3b8", font=("Segoe UI", 10),
-                      command=self._open_script_editor_manual).pack(side="left", padx=4)
+        self.preview_info = QLabel_CTK(text="Chọn video → kéo thanh tiêu đề lên/xuống để căn vị trí",
+                                       text_color="gray", wraplength=430)
+        self.preview_info.setWordWrap(True)
+        right_lay.addWidget(self.preview_info)
+        self._init_native_preview()
 
-        # CHẠY FULL PIPELINE (right of bottom bar)
-        self.btn_run = ctk.CTkButton(
-            bottom_bar,
-            text="▶  CHẠY FULL PIPELINE",
-            height=36, width=220,
-            font=("Segoe UI", 12, "bold"),
-            corner_radius=8,
-            command=self.start_thread,
-            fg_color="#4f46e5",
-            hover_color="#4338ca",
-        )
-        self.btn_run.pack(side="right", padx=12, pady=6)
-        
-        # Store preview state
-        self.preview_image = None
-        self.preview_source_size = (0, 0)
-        self.preview_frame_box = (0, 0, 0, 0)
-        self.preview_scale = 1.0
-        self.current_video_path = None
-        
-        # Store text positions (relative to preview size 380x600)
-        self.header_x, self.header_y = 190, 80  # Center horizontally
-        self.footer_x, self.footer_y = 190, 520  # Center horizontally
-        self.dragging = None  # Track which text is being dragged
-        
-        # Store text colors (RGB tuples)
-        self.header_color = (255, 255, 0)  # Yellow
-        self.footer_color = (255, 255, 255)  # White
-        self.header_bar_color = (255, 0, 0)
-        self.footer_bar_color = (0, 174, 255)
-        
-        # Store font sizes
-        self.header_font_size = 80
-        self.footer_font_size = 60
-        
-        # ── Kích hoạt tab mặc định ─────────────────────────────────────────────
-        _switch_tab("du_an")
+        # Voice selection
+        voice_row1 = QWidget()
+        vr1l = QHBoxLayout(voice_row1); vr1l.setContentsMargins(2,2,2,2)
+        vr1l.addWidget(QLabel("Ngôn ngữ:"))
+        self.tts_language = QComboBox_CTK(values=["Tiếng Việt", "English"],
+                                          width=120, command=self.on_tts_language_change)
+        self.tts_language.set("Tiếng Việt")
+        vr1l.addWidget(self.tts_language); vr1l.addStretch()
+        right_lay.addWidget(voice_row1)
 
-        # Voice intro sample
-        self.voice_intro_path = None
-        self.source_srt_path = ""
-        self.capcut_srt_output_path = ""
+        voice_row2 = QWidget()
+        vr2l = QHBoxLayout(voice_row2); vr2l.setContentsMargins(2,2,2,2)
+        self.voice_choice = QComboBox_CTK(values=self.get_voice_options("Tiếng Việt"), width=270)
+        self.voice_choice.set("Review nữ - vi-VN-HoaiMyNeural")
+        vr2l.addWidget(self.voice_choice)
+        self.btn_preview_voice = QPushButton_CTK(text="🎧 Nghe thử", width=90,
+                                                 fg_color="#0f766e", command=self._preview_voice_sample)
+        vr2l.addWidget(self.btn_preview_voice)
+        right_lay.addWidget(voice_row2)
 
-        # ── TAB 1: Dự án (file input + cắt video) ─────────────────────────────
+        # Play output
+        self.btn_play_output = QPushButton_CTK(text="▶ Xem thử video output",
+                                               fg_color="#1e40af", height=32,
+                                               command=self._open_latest_output)
+        right_lay.addWidget(self.btn_play_output)
+        right_lay.addStretch()
+
+        # ── Bottom bar ────────────────────────────────────────────────────────
+        bottom = QWidget(); bottom.setFixedHeight(48); bottom.setStyleSheet("background:#0d0d1f;")
+        bot_lay = QHBoxLayout(bottom); bot_lay.setContentsMargins(12, 6, 12, 6)
+        status_dot = QLabel("●"); status_dot.setStyleSheet("color:#22c55e;")
+        bot_lay.addWidget(status_dot)
+        self._status_label = QLabel("Sẵn sàng"); self._status_label.setStyleSheet("color:#94a3b8;font-size:10px;")
+        bot_lay.addWidget(self._status_label)
+        sep2 = QLabel("|"); sep2.setStyleSheet("color:#334155;"); bot_lay.addWidget(sep2)
+        btn_log = QPushButton_CTK(text="📋 Xem log", width=90, height=32,
+                                  fg_color="transparent", command=lambda: self._switch_tab("du_an"))
+        bot_lay.addWidget(btn_log)
+        btn_script = QPushButton_CTK(text="✏️ Script Editor", width=110, height=32,
+                                     fg_color="transparent", command=self._open_script_editor_manual)
+        bot_lay.addWidget(btn_script)
+        bot_lay.addStretch()
+        self.btn_run = QPushButton_CTK(text="▶  CHẠY FULL PIPELINE", height=36, width=220,
+                                       fg_color="#4f46e5", command=self.start_thread)
+        bot_lay.addWidget(self.btn_run)
+        body_lay.addWidget(bottom)
+
+        # ── Build tab contents ────────────────────────────────────────────────
+        self._build_tab_du_an()
+        self._build_tab_noi_dung()
+        self._build_tab_style()
+        self._switch_tab("du_an")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Tab 1: Dự án
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build_tab_du_an(self):
         self.container = self._tab_frames["du_an"]
         self.create_label("📂  Thiết lập file & Công thức băm")
-        self.video_path = self.create_file_input("Video gốc:")
-        self.bgm_path = self.create_file_input("Nhạc nền (tuỳ chọn):")
-        self.srt_path = self.create_file_input("SRT thoại nguồn (tự tạo/đã dịch):")
-        self.output_dir = self.create_file_input("Nơi lưu:", is_dir=True)
+        self.video_path    = self.create_file_input("Video gốc:")
+        self.bgm_path      = self.create_file_input("Nhạc nền (tuỳ chọn):")
+        self.srt_path      = self.create_file_input("SRT thoại nguồn (tự tạo/đã dịch):")
+        self.output_dir    = self.create_file_input("Nơi lưu:", is_dir=True)
         default_exports = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exports")
         os.makedirs(default_exports, exist_ok=True)
         self.output_dir.insert(0, default_exports)
-
-
 
         self.cut_mode_presets = {
             "Thông minh (phân cảnh + nhân vật)": (4, 8),
@@ -317,7 +866,6 @@ class App(ctk.CTk):
             "Cinematic": (10, 15),
             "Liên tục theo cảnh": (1, 0),
             "Tùy chỉnh": None,
-            # Alias cấu hình cũ, không hiển thị trong combobox mới.
             "Review nhanh (2s/6s)": (2, 6),
             "Cân bằng (5s/8s)": (5, 8),
             "Chi tiết (8s/8s)": (8, 8),
@@ -326,590 +874,833 @@ class App(ctk.CTk):
         }
         visible_cut_modes = [
             "Thông minh (phân cảnh + nhân vật)",
-            "Review nhanh",
-            "Cân bằng",
-            "Chi tiết",
-            "Cinematic",
-            "Liên tục theo cảnh",
+            "Review nhanh", "Cân bằng", "Chi tiết",
+            "Cinematic", "Liên tục theo cảnh",
         ]
-        cut_mode_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        cut_mode_frame.pack(fill="x", pady=2)
-        ctk.CTkLabel(cut_mode_frame, text="Kiểu preview:", width=120, anchor="w").pack(side="left")
-        self.cut_mode = ctk.CTkComboBox(
-            cut_mode_frame,
-            values=visible_cut_modes,
-            state="readonly",
-            width=190,
-            command=self.on_cut_mode_change,
-        )
+        row_cut = self._make_row()
+        self._add_label_to_row(row_cut, "Kiểu preview:", 120)
+        self.cut_mode = QComboBox_CTK(values=visible_cut_modes, state="readonly",
+                                      width=190, command=self.on_cut_mode_change)
         self.cut_mode.set("Thông minh (phân cảnh + nhân vật)")
-        self.cut_mode.pack(side="left", padx=5)
+        row_cut.layout().addWidget(self.cut_mode)
+        row_cut.layout().addStretch()
+        self.container._add(row_cut)
 
-        # RECAP2 flow không còn dùng UI cắt cố định giữ/bỏ. Hai entry này chỉ
-        # giữ giá trị fallback cho các đường legacy, nên không pack lên giao diện.
-        self.keep_val = ctk.CTkEntry(self.container)
-        self.skip_val = ctk.CTkEntry(self.container)
-        self.keep_val.insert(0, "4")
-        self.skip_val.insert(0, "8")
+        # keep_val / skip_val hidden
+        self.keep_val = QLineEdit_CTK(); self.keep_val.insert(0, "4")
+        self.skip_val = QLineEdit_CTK(); self.skip_val.insert(0, "8")
         self.keep_val.bind("<KeyRelease>", self._mark_cut_mode_custom)
         self.skip_val.bind("<KeyRelease>", self._mark_cut_mode_custom)
-        
-        # Duration selector
-        frame_dur = ctk.CTkFrame(self.container, fg_color="transparent")
-        frame_dur.pack(fill="x", pady=2)
-        ctk.CTkLabel(frame_dur, text="Ngân sách review (phút):", width=170, anchor="w").pack(side="left")
-        self.video_duration = ctk.CTkComboBox(
-            frame_dur, 
-            values=[
-                "5 phút", "10 phút", "15 phút", "20 phút",
-                "30 phút", "40 phút", "45 phút", "60 phút",
-            ],
-            state="readonly",
-            command=self._on_review_budget_preset_selected,
-        )
-        self.video_duration.set("20 phút")
-        self.video_duration.pack(side="left", padx=5)
-        self.custom_review_minutes = ctk.CTkEntry(
-            frame_dur,
-            width=78,
-            placeholder_text="Tự nhập",
-        )
-        self.custom_review_minutes.pack(side="left", padx=(4, 2))
-        ctk.CTkLabel(frame_dur, text="phút", width=34).pack(side="left")
-        ctk.CTkButton(
-            frame_dur,
-            text="BẰNG VIDEO GỐC",
-            width=130,
-            fg_color="#0f766e",
-            hover_color="#115e59",
-            command=self._set_review_budget_from_source,
-        ).pack(side="left", padx=(6, 0))
-        ctk.CTkButton(
-            frame_dur,
-            text="? GIẢI THÍCH",
-            width=105,
-            fg_color="#2563eb",
-            hover_color="#1d4ed8",
-            command=self._show_review_budget_help,
-        ).pack(side="left", padx=(6, 0))
-        ctk.CTkLabel(
-            self.container,
-            text="Số phút lời review AI dự kiến viết; vẫn phủ mở đầu - diễn biến - kết thúc phim, không phải cắt video nguồn.",
-            text_color="#94a3b8",
-            anchor="w",
-            justify="left",
-            wraplength=760,
-        ).pack(fill="x", padx=(120, 0), pady=(0, 4))
 
-        # Cut output folder
+        # Duration row
+        dur_row = self._make_row()
+        self._add_label_to_row(dur_row, "Ngân sách review (phút):", 170)
+        self.video_duration = QComboBox_CTK(values=["5 phút","10 phút","15 phút","20 phút",
+                                                     "30 phút","40 phút","45 phút","60 phút"],
+                                            state="readonly", command=self._on_review_budget_preset_selected)
+        self.video_duration.set("20 phút")
+        dur_row.layout().addWidget(self.video_duration)
+        self.custom_review_minutes = QLineEdit_CTK(placeholder_text="Tự nhập", width=78)
+        dur_row.layout().addWidget(self.custom_review_minutes)
+        dur_row.layout().addWidget(QLabel("phút"))
+        btn_from_src = QPushButton_CTK(text="BẰNG VIDEO GỐC", width=130, fg_color="#0f766e",
+                                       command=self._set_review_budget_from_source)
+        dur_row.layout().addWidget(btn_from_src)
+        btn_help_dur = QPushButton_CTK(text="? GIẢI THÍCH", width=105, fg_color="#2563eb",
+                                       command=self._show_review_budget_help)
+        dur_row.layout().addWidget(btn_help_dur)
+        dur_row.layout().addStretch()
+        self.container._add(dur_row)
+
+        hint_lbl = QLabel("Số phút lời review AI dự kiến viết; vẫn phủ mở đầu - diễn biến - kết thúc phim.")
+        hint_lbl.setStyleSheet("color:#94a3b8;font-size:10px;")
+        hint_lbl.setWordWrap(True)
+        self.container._add(hint_lbl)
+
         self.cut_output_dir = self.create_file_input("Thư mục lưu preview:", is_dir=True)
 
-        # Cut video button
-        self.btn_cut_video = ctk.CTkButton(
-            self.container,
-            text="⚡ TẠO PREVIEW VIDEO BĂM",
-            fg_color="#d97706",
-            hover_color="#b45309",
-            font=("Segoe UI", 12, "bold"),
-            corner_radius=8,
-            height=36,
-            command=self.start_cut_video_thread
-        )
-        self.btn_cut_video.pack(fill="x", padx=(125, 5), pady=(4, 6))
+        self.btn_cut_video = QPushButton_CTK(text="⚡ TẠO PREVIEW VIDEO BĂM",
+                                             fg_color="#d97706", height=36,
+                                             command=self.start_cut_video_thread)
+        self.container._add(self.btn_cut_video)
 
-        # ── TAB 2: Nội dung AI (CapCut SRT + AI Gemini) ───────────────────────
+        # Log
+        self.log = QTextEdit_CTK(height=140, fg_color="#0d0d1f")
+        self.log.setReadOnly(True)
+        self.container._add(self.log)
+        self._pipeline_progress_label = QLabel('Chưa chạy')
+        self.container._add(self._pipeline_progress_label)
+        self._pipeline_progress_bar = QProgressBar()
+        self._pipeline_progress_bar.setRange(0,100)
+        self._pipeline_progress_bar.setValue(0)
+        self._pipeline_progress_bar.setTextVisible(True)
+        self._pipeline_progress_bar.setMinimumHeight(20)
+        self.container._add(self._pipeline_progress_bar)
+
+        # Resume row
+        self._manual_script_review = QCheckBox("Dừng để duyệt kịch bản trước khi tạo voice")
+        self._manual_script_review.setChecked(False)
+        self._manual_script_review.toggled.connect(
+            lambda value: self.save_config({'manual_script_review': value}))
+        self.container._add(self._manual_script_review)
+        resume_row = self._make_row()
+        self.btn_resume_pipeline = QPushButton_CTK(text="▶️ Tiếp tục từ bước lỗi",
+                                                   height=32, fg_color="#7c3aed",
+                                                   command=self._resume_pipeline)
+        self.btn_open_script_editor = QPushButton_CTK(text="✏️ Script Editor",
+                                                      height=32, fg_color="#0f766e",
+                                                      command=self._open_script_editor_manual)
+        resume_row.layout().addWidget(self.btn_resume_pipeline, 1)
+        resume_row.layout().addWidget(self.btn_open_script_editor, 1)
+        self.container._add(resume_row)
+
+        # Hidden pipeline button (kept for internal refs)
+        self.btn_full_pipeline = QPushButton_CTK(text="🚀 CHẠY FULL PIPELINE",
+                                                 command=self._start_full_pipeline_thread)
+        # NOT added to layout → hidden
+
+        # Title bar preview labels (inside right preview panel)
+        # These are created dynamically when preview loads — init as None
+        self._header_bar_preview = None
+        self._header_lbl_preview = None
+        self._footer_bar_preview = None
+        self._footer_lbl_preview = None
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Tab 2: Nội dung AI
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build_tab_noi_dung(self):
         self.container = self._tab_frames["noi_dung"]
         self.create_label("🎬  Tạo SRT bằng CapCut")
 
-        srt_gen_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        srt_gen_frame.pack(fill="x", pady=5)
-        ctk.CTkLabel(srt_gen_frame, text="Video tạo SRT:", width=120, anchor="w").pack(side="left")
-        self.srt_gen_video = ctk.CTkEntry(srt_gen_frame)
-        self.srt_gen_video.pack(side="left", fill="x", expand=True, padx=5)
+        srt_gen_row = self._make_row()
+        self._add_label_to_row(srt_gen_row, "Video tạo SRT:", 120)
+        self.srt_gen_video = QLineEdit_CTK()
+        srt_gen_row.layout().addWidget(self.srt_gen_video, 1)
 
-        def browse_srt_gen_video():
-            p = filedialog.askopenfilename(
-                title="Chọn video để tạo SRT trong CapCut",
-                filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv"), ("All files", "*.*")]
-            )
+        def browse_srt_gen():
+            p = filedialog.askopenfilename(title="Chọn video để tạo SRT",
+                filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv"), ("All files", "*.*")])
             if p:
-                self.srt_gen_video.delete(0, "end")
-                self.srt_gen_video.insert(0, p)
+                self.srt_gen_video.delete(0, "end"); self.srt_gen_video.insert(0, p)
 
-        # Bind click vào ô entry để mở file picker luôn
-        self.srt_gen_video.bind("<Button-1>", lambda e: browse_srt_gen_video())
+        self.srt_gen_video.bind("<Button-1>", lambda e: browse_srt_gen())
+        btn_sgv = QPushButton_CTK(text="📁", width=50, command=browse_srt_gen)
+        srt_gen_row.layout().addWidget(btn_sgv)
+        self.container._add(srt_gen_row)
 
-        ctk.CTkButton(srt_gen_frame, text="📁", width=50, command=browse_srt_gen_video).pack(side="left", padx=2)
-
-        capcut_mode_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        capcut_mode_frame.pack(fill="x", pady=(1, 3))
-        ctk.CTkLabel(
-            capcut_mode_frame, text="Chế độ tạo SRT:", width=120, anchor="w"
-        ).pack(side="left")
-        self.capcut_srt_mode = ctk.StringVar(value=self.CAPCUT_SRT_MANUAL)
-        self.capcut_srt_mode_menu = ctk.CTkOptionMenu(
-            capcut_mode_frame,
-            variable=self.capcut_srt_mode,
+        capcut_mode_row = self._make_row()
+        self._add_label_to_row(capcut_mode_row, "Chế độ tạo SRT:", 120)
+        self.capcut_srt_mode = StringVar(value=self.CAPCUT_SRT_AUTO)
+        self.capcut_srt_mode_menu = QComboBox_CTK(
             values=[self.CAPCUT_SRT_AUTO, self.CAPCUT_SRT_MANUAL],
-            width=220,
-            command=self._on_capcut_srt_mode_change,
-        )
-        self.capcut_srt_mode_menu.pack(side="left", padx=5)
-        self.capcut_srt_mode_hint = ctk.CTkLabel(
-            capcut_mode_frame,
-            text="Ổn định nhất: mở CapCut, tạo Auto Caption rồi đóng CapCut.",
-            text_color="#94a3b8",
-            anchor="w",
-        )
-        self.capcut_srt_mode_hint.pack(side="left", fill="x", expand=True, padx=(8, 0))
+            width=220, command=self._on_capcut_srt_mode_change)
+        self.capcut_srt_mode_menu.set(self.CAPCUT_SRT_AUTO)
+        capcut_mode_row.layout().addWidget(self.capcut_srt_mode_menu)
+        self.capcut_srt_mode_hint = QLabel_CTK(
+            text="Nhận dạng phụ đề qua dịch vụ CapCut, không mở CapCut Desktop.",
+            text_color="#94a3b8")
+        self.capcut_srt_mode_hint.setWordWrap(True)
+        capcut_mode_row.layout().addWidget(self.capcut_srt_mode_hint, 1)
+        self.container._add(capcut_mode_row)
 
-        self.btn_capcut_srt = ctk.CTkButton(
-            self.container,
-            text="🎬 AUTO CAPCUT TẠO SRT",
-            fg_color="#2563eb",
-            hover_color="#1d4ed8",
-            font=("Segoe UI", 12, "bold"),
-            corner_radius=8,
-            height=36,
-            command=self.start_capcut_workflow_thread
-        )
-        self.btn_capcut_srt.pack(fill="x", padx=(125, 5), pady=(4, 6))
-
-        # ── Device fingerprint ─────────────────────────────────────────────────
-        dev_card = ctk.CTkFrame(self.container, fg_color="#16213e", corner_radius=6)
-        dev_card.pack(fill="x", pady=(0, 4))
-        ctk.CTkLabel(
-            dev_card, text="🔑 Device ID:", width=120, anchor="w",
-            font=("Segoe UI", 11), text_color="#94a3b8"
-        ).pack(side="left", padx=(10, 0), pady=4)
-        _init_dev = self._load_capcut_device()
-        self._lbl_device_info = ctk.CTkLabel(
-            dev_card,
-            text=f"device_id: {_init_dev['device_id'][:12]}...  iid: {_init_dev['iid'][:12]}...",
-            font=("Segoe UI", 10), text_color="#64748b", anchor="w"
-        )
-        self._lbl_device_info.pack(side="left", fill="x", expand=True, padx=6)
-        ctk.CTkButton(
-            dev_card, text="🎲 Đổi mới", width=80, height=26,
-            font=("Segoe UI", 10), corner_radius=6,
-            fg_color="#334155", hover_color="#475569", text_color="#e2e8f0",
-            command=lambda: (self._generate_capcut_device(), self._refresh_device_label())
-        ).pack(side="right", padx=(0, 8), pady=4)
-        # ──────────────────────────────────────────────────────────────────────
-
-        # Auto workflow da bi tat - khong tu dong chay Gemini sau CapCut
-        self.auto_workflow_enabled = BooleanVar(value=False)
+        self.btn_capcut_srt = QPushButton_CTK(text="🎬 AUTO CAPCUT TẠO SRT",
+                                               fg_color="#2563eb", height=36,
+                                               command=self.start_capcut_workflow_thread)
+        self.container._add(self.btn_capcut_srt)
 
         self.create_label("🤖  AI Gemini & Nội dung")
-        self.api_key = self.create_entry("Gemini API Key:", "Dán key vào đây...", show="*")
-        self.api_keys_file = self.create_file_input("File keys .txt:")
+        self.api_key          = self.create_entry("Gemini API Key:", "Dán key vào đây...", show="*")
+        self.api_keys_file    = self.create_file_input("File keys .txt:")
         self.openrouter_api_key = self.create_entry("OpenRouter Key:", "sk-or-... (free text/vision fallback)", show="*")
 
-        gemini_login_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        gemini_login_frame.pack(fill="x", pady=(4, 6))
-        ctk.CTkLabel(
-            gemini_login_frame,
-            text="Gemini Web:",
-            width=120,
-            anchor="w",
-        ).pack(side="left")
-        self.gemini_web_login_btn = ctk.CTkButton(
-            gemini_login_frame,
-            text="ĐĂNG NHẬP GEMINI WEB",
-            width=210,
-            fg_color="#0f766e",
-            hover_color="#115e59",
-            command=self.login_gemini_web,
-        )
-        self.gemini_web_login_btn.pack(side="left", padx=5)
-        self.gemini_web_status_label = ctk.CTkLabel(
-            gemini_login_frame,
-            text="Đang kiểm tra phiên...",
-            text_color="#94a3b8",
-            anchor="w",
-        )
-        self.gemini_web_status_label.pack(side="left", fill="x", expand=True, padx=(8, 0))
-        self._gemini_login_running = False
-        self.after(300, self._refresh_gemini_web_login_status)
+        gemini_row = self._make_row()
+        self._add_label_to_row(gemini_row, "Gemini Web:", 120)
+        self.gemini_web_login_btn = QPushButton_CTK(text="ĐĂNG NHẬP GEMINI WEB",
+                                                    width=210, fg_color="#0f766e",
+                                                    command=self.login_gemini_web)
+        gemini_row.layout().addWidget(self.gemini_web_login_btn)
+        self.gemini_web_status_label = QLabel_CTK(text="Đang kiểm tra phiên...", text_color="#94a3b8")
+        gemini_row.layout().addWidget(self.gemini_web_status_label, 1)
+        self.container._add(gemini_row)
 
-        self.movie_name = self.create_entry("Tên phim:", "Ví dụ: Người Nhện")
-        self.movie_description = self.create_text_area(
-            "Tóm tắt nội dung phim:",
-            "Dán mô tả ngắn về cốt truyện phim..."
-        )
+        self.movie_name        = self.create_entry("Tên phim:", "Ví dụ: Người Nhện")
+        self.movie_description = self.create_text_area("Tóm tắt nội dung phim:",
+                                                        "Dán mô tả ngắn về cốt truyện phim...")
         self._setup_review_style_selector()
-        
-        # Pipeline hiện là workflow chính. Kịch bản được tạo trong pipeline và chỉnh ở Script Editor,
-        # nên các nút/ô review cũ được bỏ khỏi màn hình chính để tránh chạy nhầm workflow cũ.
-        
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Tab 3: Style & Giọng đọc
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build_tab_style(self):
+        self.container = self._tab_frames["style"]
+        self.create_label("🖼️  Header & Footer")
+        self._header_visible = QCheckBox("Hiện tiêu đề trên")
+        self._header_visible.setChecked(True)
+        self._header_visible.toggled.connect(self._title_visibility_changed)
+        self.container._add(self._header_visible)
+        self.header_text = self.create_entry("Tiêu đề trên:", "Nhập tiêu đề trên...")
+        self.header_text.setText("CHƯA CÓ TIÊU ĐỀ")
+        self._footer_visible = QCheckBox("Hiện tiêu đề dưới")
+        self._footer_visible.setChecked(True)
+        self._footer_visible.toggled.connect(self._title_visibility_changed)
+        self.container._add(self._footer_visible)
+        self.footer_text = self.create_entry("Tiêu đề dưới:", "Nhập tiêu đề dưới...")
+        self.footer_text.setText("XEM NGAY KẾT CỤC")
+        self.header_text.textChanged.connect(lambda _: self.update_preview_delayed())
+        self.footer_text.textChanged.connect(lambda _: self.update_preview_delayed())
+        self.header_text.editingFinished.connect(self._save_title_text)
+        self.footer_text.editingFinished.connect(self._save_title_text)
+
+        self.create_label("📐  Style & Căn chỉnh")
+        h_align_row = self._make_row()
+        self._add_label_to_row(h_align_row, "Vị trí tiêu đề trên:", 120)
+        self.header_align = QComboBox_CTK(values=["Trái", "Giữa", "Phải"], state="readonly", width=100)
+        self.header_align.set("Giữa")
+        self.header_align.currentTextChanged.connect(lambda _: self.update_preview_delayed())
+        h_align_row.layout().addWidget(self.header_align); h_align_row.layout().addStretch()
+        self.container._add(h_align_row)
+
+        f_align_row = self._make_row()
+        self._add_label_to_row(f_align_row, "Vị trí tiêu đề dưới:", 120)
+        self.footer_align = QComboBox_CTK(values=["Trái", "Giữa", "Phải"], state="readonly", width=100)
+        self.footer_align.set("Giữa")
+        self.footer_align.currentTextChanged.connect(lambda _: self.update_preview_delayed())
+        f_align_row.layout().addWidget(self.footer_align); f_align_row.layout().addStretch()
+        self.container._add(f_align_row)
+
+        self.create_label("🎨  Font & Màu sắc")
+
+        # Header font slider
+        h_font_row = self._make_row()
+        self._add_label_to_row(h_font_row, "Font tiêu đề trên:", 120)
+        self.header_font_slider = QSlider_CTK(from_=20, to=120, number_of_steps=100)
+        h_font_row.layout().addWidget(self.header_font_slider, 1)
+        self.header_font_label = QLabel_CTK(text="80", width=40)
+        h_font_row.layout().addWidget(self.header_font_label)
+        self.container._add(h_font_row)
+        # connect after label exists, then set value
+        self.header_font_slider.valueChanged.connect(lambda v: self.on_header_font_change(float(v)))
+        self.header_font_slider.set(80)
+
+        # Footer font slider
+        f_font_row = self._make_row()
+        self._add_label_to_row(f_font_row, "Font tiêu đề dưới:", 120)
+        self.footer_font_slider = QSlider_CTK(from_=20, to=120, number_of_steps=100)
+        f_font_row.layout().addWidget(self.footer_font_slider, 1)
+        self.footer_font_label = QLabel_CTK(text="60", width=40)
+        f_font_row.layout().addWidget(self.footer_font_label)
+        self.container._add(f_font_row)
+        self.footer_font_slider.valueChanged.connect(lambda v: self.on_footer_font_change(float(v)))
+        self.footer_font_slider.set(60)
+
+        # Color pickers
+        h_color_row = self._make_row()
+        self._add_label_to_row(h_color_row, "Màu tiêu đề trên:", 120)
+        self.header_color_btn = QPushButton_CTK(text="🎨 Chọn màu", width=100,
+                                                command=self.pick_header_color, fg_color="#FFFF00")
+        h_color_row.layout().addWidget(self.header_color_btn); h_color_row.layout().addStretch()
+        self.container._add(h_color_row)
+
+        f_color_row = self._make_row()
+        self._add_label_to_row(f_color_row, "Màu tiêu đề dưới:", 120)
+        self.footer_color_btn = QPushButton_CTK(text="🎨 Chọn màu", width=100,
+                                                command=self.pick_footer_color, fg_color="#FFFFFF")
+        f_color_row.layout().addWidget(self.footer_color_btn); f_color_row.layout().addStretch()
+        self.container._add(f_color_row)
+
+        h_bar_row = self._make_row()
+        self._add_label_to_row(h_bar_row, "Màu thanh trên:", 120)
+        self.header_bar_color_btn = QPushButton_CTK(text="▮ Chọn màu", width=100,
+                                                    command=self.pick_header_bar_color, fg_color="#FF0000")
+        h_bar_row.layout().addWidget(self.header_bar_color_btn); h_bar_row.layout().addStretch()
+        self.container._add(h_bar_row)
+
+        f_bar_row = self._make_row()
+        self._add_label_to_row(f_bar_row, "Màu thanh dưới:", 120)
+        self.footer_bar_color_btn = QPushButton_CTK(text="▮ Chọn màu", width=100,
+                                                    command=self.pick_footer_bar_color, fg_color="#00AEFF")
+        f_bar_row.layout().addWidget(self.footer_bar_color_btn); f_bar_row.layout().addStretch()
+        self.container._add(f_bar_row)
+
+        btn_gen = QPushButton_CTK(text="✨ AI TẠO TIÊU ĐỀ ẢNH (KHÔNG SỬA SCRIPT)",
+                                  fg_color="purple", command=self.auto_gen_title)
+        self.container._add(btn_gen)
+
+        # Logo
+        self.create_label("🖼️  Logo / Watermark")
+        logo_row = self._make_row()
+        self._add_label_to_row(logo_row, "File logo (PNG):", 120)
+        self._logo_entry = QLineEdit_CTK(placeholder_text="Chưa chọn...")
+        logo_row.layout().addWidget(self._logo_entry, 1)
+        self._logo_entry.editingFinished.connect(self._logo_path_edited)
+
+        def _browse_logo():
+            p = filedialog.askopenfilename(title="Chọn logo PNG",
+                filetypes=[("PNG image", "*.png"), ("Ảnh", "*.png *.jpg *.jpeg"), ("All", "*.*")])
+            if p:
+                self.logo_path_var = p
+                self._logo_entry.delete(0, "end"); self._logo_entry.insert(0, p)
+                self.update_preview_delayed(); self.save_config({"logo_path": p})
+
+        def _clear_logo():
+            self.logo_path_var = ""
+            self._logo_entry.delete(0, "end")
+            self.update_preview_delayed(); self.save_config({"logo_path": ""})
+
+        logo_row.layout().addWidget(QPushButton_CTK(text="📁", width=40, command=_browse_logo))
+        logo_row.layout().addWidget(QPushButton_CTK(text="✕", width=30, fg_color="#555", command=_clear_logo))
+        self.container._add(logo_row)
+
+        logo_hint = QLabel("💡 Kéo logo trên preview để định vị tự do. Cuộn chuột trên logo để resize.")
+        logo_hint.setStyleSheet("color:#aaa;font-size:11px;")
+        self.container._add(logo_hint)
+
+        logo_size_row = self._make_row()
+        self._add_label_to_row(logo_size_row, "Kích thước (%):", 120)
+        self._logo_size_spin = QLineEdit_CTK(width=50); self._logo_size_spin.insert(0, "10")
+
+        def _on_logo_size(*_):
+            try:
+                v = float(self._logo_size_spin.get())
+                self.logo_size_pct_var = max(1, min(50, v))
+            except ValueError: pass
+            self.update_preview_delayed(); self.save_config({"logo_size_pct": self.logo_size_pct_var})
+
+        self._logo_size_spin.bind("<FocusOut>", _on_logo_size)
+        self._logo_size_spin.bind("<Return>",   _on_logo_size)
+        logo_size_row.layout().addWidget(self._logo_size_spin); logo_size_row.layout().addStretch()
+        self.container._add(logo_size_row)
+
+        # Delogo
+        self.create_label("🔲  Làm mờ để che sub cũ")
+        self._delogo_var = BooleanVar(value=False)
+        delogo_chk = QCheckBox_CTK(
+            text="Bật làm mờ che sub cũ (các khung Mờ # trên preview)",
+            variable=self._delogo_var,
+            command=lambda: (setattr(self, "delogo_enabled", self._delogo_var.get()),
+                             self.update_preview_delayed(),
+                             self.save_config({"delogo_enabled": self.delogo_enabled})))
+        self._delogo_checkbox = delogo_chk
+        self.container._add(delogo_chk)
+
+        delogo_info = QLabel("Mỗi khung Mờ # là một vùng làm mờ để che chữ cũ trong video. Kéo khung để di chuyển; kéo cạnh/góc để đổi kích thước.")
+        delogo_info.setStyleSheet("color:#aaa;font-size:11px;"); delogo_info.setWordWrap(True)
+        self.container._add(delogo_info)
+
+        delogo_btn_row = self._make_row()
+
+        def _add_delogo_box():
+            self.delogo_boxes.append({"x": 0.1, "y": 0.6, "w": 0.5, "h": 0.10})
+            self.delogo_enabled = True; self._delogo_var.set(True)
+            self._delogo_checkbox.setChecked(True)
+            self.update_preview_delayed()
+            self.save_config({"delogo_boxes": self.delogo_boxes, "delogo_enabled": True})
+
+        def _clear_delogo_boxes():
+            self.delogo_boxes.clear()
+            self.delogo_enabled = False
+            self._delogo_var.set(False)
+            self._delogo_checkbox.setChecked(False)
+            self.update_preview_delayed()
+            self.save_config({"delogo_boxes": [], "delogo_enabled": False})
+
+        delogo_btn_row.layout().addWidget(QPushButton_CTK(text="＋ Mờ che sub cũ", width=145,
+                                                           fg_color="#1e3a5f", command=_add_delogo_box))
+        delogo_btn_row.layout().addWidget(QPushButton_CTK(text="🗑 Xóa hết", width=90,
+                                                           fg_color="#4a1010", command=_clear_delogo_boxes))
+        delogo_btn_row.layout().addStretch()
+        self.container._add(delogo_btn_row)
+
+        # Burn SRT
+        self.create_label("📝  Sub thuyết minh mới")
+        self._burn_srt_var = BooleanVar(value=False)
+        burn_chk = QCheckBox_CTK(
+            text="Hiện chữ mẫu / khắc sub thuyết minh khi xuất", variable=self._burn_srt_var,
+            command=lambda: (setattr(self, "burn_srt_enabled", self._burn_srt_var.get()),
+                             self.save_config({"burn_srt_enabled": self.burn_srt_enabled}),
+                             self.update_preview_delayed()))
+        self._burn_checkbox = burn_chk
+        self.container._add(burn_chk)
+
+        burn_file_row = self._make_row()
+        self._add_label_to_row(burn_file_row, "SRT riêng (tùy chọn):", 150)
+        self._burn_srt_entry = QLineEdit_CTK(placeholder_text="Để trống: Full Pipeline dùng SRT thuyết minh tự tạo")
+        self._burn_srt_entry.editingFinished.connect(self._burn_srt_path_edited)
+        burn_file_row.layout().addWidget(self._burn_srt_entry, 1)
+
+        def _browse_burn_srt():
+            p = filedialog.askopenfilename(title="Chọn file SRT",
+                filetypes=[("SRT subtitles", "*.srt"), ("All", "*.*")])
+            if p:
+                self.burn_srt_path_var = p
+                self._burn_srt_entry.delete(0, "end"); self._burn_srt_entry.insert(0, p)
+                self.save_config({"burn_srt_path": p})
+                self.update_preview_delayed()
+
+        burn_file_row.layout().addWidget(QPushButton_CTK(text="📁", width=40, command=_browse_burn_srt))
+        self.container._add(burn_file_row)
+
+        burn_style_row = self._make_row()
+        self._add_label_to_row(burn_style_row, "Cỡ chữ sub:", 120)
+        self._burn_fs_entry = QLineEdit_CTK(width=50); self._burn_fs_entry.insert(0, "36")
+
+        def _on_burn_fs(*_):
+            try: self.burn_sub_fontsize_var = int(self._burn_fs_entry.get())
+            except ValueError: pass
+            self.save_config({"burn_sub_fontsize": self.burn_sub_fontsize_var})
+            self.update_preview_delayed()
+
+        self._burn_fs_entry.bind("<FocusOut>", _on_burn_fs)
+        self._burn_fs_entry.bind("<Return>",   _on_burn_fs)
+        burn_style_row.layout().addWidget(self._burn_fs_entry)
+        burn_style_row.layout().addWidget(QLabel("  Màu chữ:"))
+        self._burn_color_cb = QComboBox_CTK(
+            values=["white","yellow","cyan","green","orange","pink"],
+            state="readonly", width=100,
+            command=lambda v: (setattr(self, "burn_sub_color_var", v),
+                               self.save_config({"burn_sub_color": v}),
+                               self.update_preview_delayed()))
+        self._burn_color_cb.set("white")
+        burn_style_row.layout().addWidget(self._burn_color_cb)
+        burn_style_row.layout().addWidget(QLabel("  Viền đen:"))
+        self._burn_outline_spin = QSpinBox()
+        self._burn_outline_spin.setRange(0, 12)
+        self._burn_outline_spin.setSuffix(" px")
+        self._burn_outline_spin.setValue(self.burn_sub_outline_var)
+        self._burn_outline_spin.setToolTip("Độ dày viền đen quanh chữ. 0 = tắt viền. Áp dụng cho chữ mẫu và sub xuất.")
+        self._burn_outline_spin.valueChanged.connect(self._burn_outline_changed)
+        burn_style_row.layout().addWidget(self._burn_outline_spin)
+        burn_style_row.layout().addStretch()
+        self.container._add(burn_style_row)
+        from core.preview_design import FONT_FILES
+        font_row = QWidget()
+        font_layout = QHBoxLayout(font_row)
+        font_layout.setContentsMargins(0,0,0,0)
+        font_layout.addWidget(QLabel('Phông chữ:'))
+        self._sub_font_combo = QComboBox()
+        self._sub_font_combo.addItems(list(FONT_FILES))
+        self._sub_font_combo.currentTextChanged.connect(lambda v:self._subtitle_style_changed('font',v))
+        font_layout.addWidget(self._sub_font_combo)
+        self._sub_background_check = QCheckBox('Nền chữ')
+        self._sub_background_check.setChecked(True)
+        self._sub_background_check.toggled.connect(lambda v:self._subtitle_style_changed('background',v))
+        font_layout.addWidget(self._sub_background_check)
+        self._sub_background_color = QPushButton('Màu nền')
+        self._sub_background_color.clicked.connect(self._choose_sub_background)
+        font_layout.addWidget(self._sub_background_color)
+        font_layout.addWidget(QLabel('Độ đậm:'))
+        self._sub_background_opacity = QSpinBox()
+        self._sub_background_opacity.setRange(0,100)
+        self._sub_background_opacity.setSuffix(' %')
+        self._sub_background_opacity.setValue(70)
+        self._sub_background_opacity.valueChanged.connect(lambda v:self._subtitle_style_changed('background_opacity',v))
+        font_layout.addWidget(self._sub_background_opacity)
+        font_layout.addStretch()
+        self.container._add(font_row)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  _switch_tab
+    # ─────────────────────────────────────────────────────────────────────────
+    def _switch_tab(self, name):
+        self._tab_stack.setCurrentIndex(self._tab_stack_idx[name])
+        for n, b in self._tab_btns.items():
+            if n == name:
+                b.setStyleSheet("background:#1e293b;color:#a5b4fc;border:none;border-radius:0;padding:0 8px;font-size:11px;")
+            else:
+                b.setStyleSheet("background:transparent;color:#64748b;border:none;border-radius:0;padding:0 8px;font-size:11px;")
+        self._active_tab = name
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  UI helper methods (CTk-compatible)
+    # ─────────────────────────────────────────────────────────────────────────
+    def _make_row(self) -> QWidget:
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(6)
+        return w
+
+    def _add_label_to_row(self, row: QWidget, text: str, width: int = 120):
+        lbl = QLabel(text)
+        lbl.setFixedWidth(width)
+        lbl.setStyleSheet("color:#94a3b8;font-size:11px;")
+        row.layout().addWidget(lbl)
+
+    def create_label(self, text):
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color:#818cf8;font-size:11px;font-weight:bold;")
+        self.container._add(lbl)
+
+    def create_file_input(self, label_text, is_dir=False):
+        frame = QWidget()
+        frame.setStyleSheet("background:#16213e;border-radius:6px;")
+        lay = QHBoxLayout(frame); lay.setContentsMargins(10, 3, 6, 3); lay.setSpacing(4)
+        lbl = QLabel(label_text); lbl.setFixedWidth(120)
+        lbl.setStyleSheet("color:#94a3b8;font-size:11px;background:transparent;")
+        lay.addWidget(lbl)
+        entry = QLineEdit_CTK()
+        entry.setStyleSheet("background:#16213e;border:none;color:#e2e8f0;")
+        lay.addWidget(entry, 1)
+        lower_label = label_text.lower()
+
+        def on_change(_=None):
+            self.update_preview_delayed()
+            if ("video" in lower_label and not is_dir) or \
+               (is_dir and any(k in lower_label for k in ("lưu", "output", "thư mục"))):
+                self._sync_cut_related_paths()
+        entry.textChanged.connect(lambda _t: on_change())
+
+        def browse():
+            if is_dir:
+                p = filedialog.askdirectory(title=f"Chọn: {label_text}")
+            else:
+                p = filedialog.askopenfilename(title=f"Chọn: {label_text}",
+                    filetypes=[("Video/Sub/Audio", "*.mp4 *.mkv *.avi *.mov *.srt *.mp3 *.wav *.m4a"),
+                               ("All files", "*.*")])
+            if p:
+                entry.delete(0, "end"); entry.insert(0, p)
+                on_change()
+                if "video" in lower_label and not is_dir:
+                    self.current_video_path = p
+                    threading.Thread(target=self.load_video_preview, daemon=True).start()
+
+        btn = QPushButton("📁"); btn.setFixedWidth(28); btn.setFixedHeight(24)
+        btn.setStyleSheet("background:#334155;color:white;border:none;border-radius:3px;")
+        btn.clicked.connect(browse)
+        lay.addWidget(btn)
+        self.container._add(frame)
+        return entry
+
+    def create_entry(self, label_text, placeholder, show=None):
+        frame = QWidget()
+        lay = QHBoxLayout(frame); lay.setContentsMargins(4, 2, 4, 2)
+        lbl = QLabel(label_text); lbl.setFixedWidth(120)
+        lbl.setStyleSheet("color:#94a3b8;font-size:11px;")
+        lay.addWidget(lbl)
+        entry = QLineEdit_CTK(placeholder_text=placeholder, show=show)
+        lay.addWidget(entry, 1)
+        self.container._add(frame)
+        return entry
+
+    def create_text_area(self, label_text, placeholder, height=80):
+        lbl = QLabel(label_text); lbl.setStyleSheet("color:#94a3b8;font-size:11px;")
+        self.container._add(lbl)
+        ta = QTextEdit()
+        ta.setPlaceholderText(placeholder)
+        ta.setFixedHeight(height)
+        ta.setStyleSheet("background:#16213e;color:#e2e8f0;border:1px solid #1e293b;border-radius:4px;")
+        # Compat: add .get() / .insert() shim
+        ta.get = ta.toPlainText
+        ta.insert = lambda pos, text: ta.insertPlainText(str(text))
+        ta.delete = lambda s, e: ta.clear()
+        self.container._add(ta)
+        return ta
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  CTk / tkinter compatibility API
+    # ─────────────────────────────────────────────────────────────────────────
+    def after(self, ms, fn=None):
+        """Drop-in for tkinter's after() — returns a QTimer (cancelable)."""
+        if QThread.currentThread() != self.thread():
+            self._ui_call.emit(lambda: self.after(ms, fn))
+            return None
+        t = QTimer(self)
+        t.setSingleShot(True)
+        if fn:
+            t.timeout.connect(fn)
+        t.timeout.connect(t.deleteLater)
+        t.start(int(ms))
+        return t
+
+    def after_cancel(self, timer_id):
+        if hasattr(timer_id, "stop"):
+            try:
+                timer_id.stop()
+                timer_id.deleteLater()
+            except Exception: pass
+
+    def update_idletasks(self):
+        QApplication.processEvents()
+
+    def mainloop(self):
+        pass  # lifecycle managed by QApplication.exec()
+
+    def deiconify(self):
+        self.show()
+
+    def clipboard_clear(self):
+        QApplication.clipboard().clear()
+
+    def clipboard_append(self, text):
+        QApplication.clipboard().setText(text)
+
+    def clipboard_get(self):
+        return QApplication.clipboard().text()
+
+    def winfo_exists(self): return True
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Config loading (called after UI is built)
+    # ─────────────────────────────────────────────────────────────────────────
+    def _load_saved_config(self):
         try:
             cfg = self.load_config()
-            if cfg.get('gemini_api_key'):
-                self.api_key.insert(0, cfg.get('gemini_api_key'))
-            if cfg.get('gemini_keys_file'):
-                self.api_keys_file.insert(0, cfg.get('gemini_keys_file'))
-            if cfg.get('openrouter_api_key'):
-                self.openrouter_api_key.insert(0, cfg.get('openrouter_api_key'))
-            if cfg.get('review_style') and hasattr(self, "review_style"):
-                self._set_review_style(cfg.get('review_style'), save=False)
+            audio_enabled = bool(cfg.get("preview_audio_enabled", True))
+            self._manual_script_review.blockSignals(True)
+            self._manual_script_review.setChecked(bool(cfg.get('manual_script_review', False)))
+            self._manual_script_review.blockSignals(False)
+            self._preview_audio_checkbox.blockSignals(True)
+            self._preview_audio_checkbox.setChecked(audio_enabled)
+            self._preview_audio_checkbox.blockSignals(False)
+            self.preview_canvas.audio.setMuted(not audio_enabled)
+            for name in ("header", "footer"):
+                if name+"_text" in cfg:
+                    getattr(self, name+"_text").setText(str(cfg[name+"_text"] or ""))
+                checkbox = getattr(self, "_"+name+"_visible")
+                checkbox.blockSignals(True)
+                checkbox.setChecked(bool(cfg.get(name+"_visible", True)))
+                checkbox.blockSignals(False)
+            if cfg.get("gemini_api_key"):
+                self.api_key.insert(0, cfg["gemini_api_key"])
+            if cfg.get("gemini_keys_file"):
+                self.api_keys_file.insert(0, cfg["gemini_keys_file"])
+            if cfg.get("openrouter_api_key"):
+                self.openrouter_api_key.insert(0, cfg["openrouter_api_key"])
+            if cfg.get("review_style") and hasattr(self, "review_style"):
+                self._set_review_style(cfg["review_style"], save=False)
             if hasattr(self, "capcut_srt_mode"):
-                mode_key = str(cfg.get("capcut_srt_mode", "manual") or "manual").strip().lower()
-                self.capcut_srt_mode.set(
-                    self.CAPCUT_SRT_MANUAL if mode_key == "manual" else self.CAPCUT_SRT_AUTO
-                )
-                self._on_capcut_srt_mode_change(self.capcut_srt_mode.get(), save=False)
-            # Tự động load preview nếu đã có video từ lần trước
-            if cfg.get('video_source'):
-                vpath = cfg.get('video_source', '').strip()
+                mode_key = str(cfg.get("capcut_srt_mode", "auto") or "auto").strip().lower()
+                if not cfg.get('capcut_background_default_v1'):
+                    mode_key = 'auto'
+                    self.save_config({'capcut_srt_mode':'auto','capcut_background_default_v1':True})
+                val = self.CAPCUT_SRT_MANUAL if mode_key == "manual" else self.CAPCUT_SRT_AUTO
+                self.capcut_srt_mode.set(val)
+                self.capcut_srt_mode_menu.set(val)
+                self._on_capcut_srt_mode_change(val, save=False)
+            if cfg.get("video_source"):
+                vpath = cfg["video_source"].strip()
                 if vpath and os.path.exists(vpath):
                     self.current_video_path = vpath
-                    self.after(1500, lambda: threading.Thread(
-                        target=self.load_video_preview, daemon=True
-                    ).start())
-            # Sync thanh tiêu đề preview (chỉ khi đã có video)
-            # KHÔNG vẽ placeholder — canvas giữ màu đen cho đến khi user chọn video
+                    # Không tự load preview video cũ khi khởi động — user cần chọn video mới
+            if cfg.get("logo_path") and hasattr(self, "_logo_entry"):
+                p = cfg["logo_path"]
+                if os.path.exists(p):
+                    self.logo_path_var = p; self._logo_entry.insert(0, p)
+            if cfg.get("logo_corner"):
+                _c = cfg["logo_corner"]; self.logo_corner_var = _c
+                self.logo_x_ratio = 0.85 if "right" in _c else 0.05
+                self.logo_y_ratio = 0.05 if "top"   in _c else 0.90
+            if cfg.get("logo_x_ratio") is not None: self.logo_x_ratio = float(cfg["logo_x_ratio"])
+            if cfg.get("logo_y_ratio") is not None: self.logo_y_ratio = float(cfg["logo_y_ratio"])
+            if cfg.get("logo_size_pct") and hasattr(self, "_logo_size_spin"):
+                self.logo_size_pct_var = float(cfg["logo_size_pct"])
+                self._logo_size_spin.delete(0, "end")
+                self._logo_size_spin.insert(0, str(self.logo_size_pct_var))
+            if cfg.get("delogo_enabled") and hasattr(self, "_delogo_var"):
+                self.delogo_enabled = bool(cfg["delogo_enabled"])
+                self._delogo_var.set(self.delogo_enabled)
+                self._delogo_checkbox.setChecked(self.delogo_enabled)
+            if cfg.get("delogo_boxes") and isinstance(cfg["delogo_boxes"], list):
+                self.delogo_boxes = cfg["delogo_boxes"]
+                self.delogo_region = self.delogo_boxes[0] if self.delogo_boxes else {}
+            elif cfg.get("delogo_region") and isinstance(cfg["delogo_region"], dict):
+                self.delogo_boxes = [cfg["delogo_region"]]
+                self.delogo_region = self.delogo_boxes[0]
+            if cfg.get("burn_srt_enabled") and hasattr(self, "_burn_srt_var"):
+                self.burn_srt_enabled = bool(cfg["burn_srt_enabled"])
+                self._burn_srt_var.set(self.burn_srt_enabled)
+                self._burn_checkbox.setChecked(self.burn_srt_enabled)
+            if cfg.get("burn_srt_path") and hasattr(self, "_burn_srt_entry"):
+                self.burn_srt_path_var = cfg["burn_srt_path"]
+                self._burn_srt_entry.insert(0, cfg["burn_srt_path"])
+            if cfg.get("burn_sub_fontsize") and hasattr(self, "_burn_fs_entry"):
+                self.burn_sub_fontsize_var = int(cfg["burn_sub_fontsize"])
+                self._burn_fs_entry.delete(0, "end")
+                self._burn_fs_entry.insert(0, str(self.burn_sub_fontsize_var))
+            if cfg.get("burn_sub_color") and hasattr(self, "_burn_color_cb"):
+                self.burn_sub_color_var = cfg["burn_sub_color"]
+                self._burn_color_cb.set(cfg["burn_sub_color"])
+            self.burn_sub_x_ratio = float(cfg.get("burn_sub_x_ratio", .5))
+            self.burn_sub_y_ratio = float(cfg.get("burn_sub_y_ratio", .78))
+            self.burn_sub_outline_var = max(0, min(12, int(cfg.get("burn_sub_outline", 2))))
+            self._burn_outline_spin.blockSignals(True)
+            self._burn_outline_spin.setValue(self.burn_sub_outline_var)
+            self._burn_outline_spin.blockSignals(False)
+            for key, widget, setter, default in [
+                ('font',self._sub_font_combo,'setCurrentText','Arial'),
+                ('background',self._sub_background_check,'setChecked',True),
+                ('background_opacity',self._sub_background_opacity,'setValue',70)]:
+                value = cfg.get('burn_sub_'+key,default)
+                widget.blockSignals(True)
+                getattr(widget,setter)(value)
+                widget.blockSignals(False)
+                setattr(self,'burn_sub_'+key+'_var',value)
+            self.burn_sub_background_color_var = cfg.get('burn_sub_background_color','#000000')
+            self._sub_background_color.setStyleSheet('background:'+self.burn_sub_background_color_var)
         except Exception:
             pass
 
-        
-        # ── TAB 3: Style & Giọng đọc ──────────────────────────────────────────
-        self.container = self._tab_frames["style"]
-        self.create_label("🖼️  Header & Footer")
-        self.header_text = self.create_entry("Tiêu đề trên:", "CHƯA CÓ TIÊU ĐỀ")
-        self.footer_text = self.create_entry("Tiêu đề dưới:", "XEM NGAY KẾT CỤC")
-        
-        # Style options
-        self.create_label("📐  Style & Căn chỉnh")
-        
-        # Header alignment
-        h_align_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        h_align_frame.pack(fill="x", pady=2)
-        ctk.CTkLabel(h_align_frame, text="Vị trí tiêu đề trên:", width=120, anchor="w").pack(side="left")
-        self.header_align = ctk.CTkComboBox(
-            h_align_frame, 
-            values=["Trái", "Giữa", "Phải"],
-            state="readonly",
-            width=100
-        )
-        self.header_align.set("Giữa")
-        self.header_align.pack(side="left", padx=5)
-        self.header_align.configure(command=self.update_preview_delayed)
-        
-        # Footer alignment
-        f_align_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        f_align_frame.pack(fill="x", pady=2)
-        ctk.CTkLabel(f_align_frame, text="Vị trí tiêu đề dưới:", width=120, anchor="w").pack(side="left")
-        self.footer_align = ctk.CTkComboBox(
-            f_align_frame, 
-            values=["Trái", "Giữa", "Phải"],
-            state="readonly",
-            width=100
-        )
-        self.footer_align.set("Giữa")
-        self.footer_align.pack(side="left", padx=5)
-        self.footer_align.configure(command=self.update_preview_delayed)
-        
-        # Font size sliders and color controls
-        self.create_label("🎨  Font & Màu sắc")
-        
-        # Header font size slider
-        h_font_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        h_font_frame.pack(fill="x", pady=5)
-        ctk.CTkLabel(h_font_frame, text="Font tiêu đề trên:", width=120, anchor="w").pack(side="left", pady=2)
-        self.header_font_slider = ctk.CTkSlider(
-            h_font_frame, from_=20, to=120, number_of_steps=100,
-            command=self.on_header_font_change
-        )
-        self.header_font_slider.set(80)
-        self.header_font_slider.pack(side="left", fill="x", expand=True, padx=5)
-        self.header_font_label = ctk.CTkLabel(h_font_frame, text="80", width=40, anchor="w")
-        self.header_font_label.pack(side="left", padx=2)
-        
-        # Footer font size slider
-        f_font_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        f_font_frame.pack(fill="x", pady=5)
-        ctk.CTkLabel(f_font_frame, text="Font tiêu đề dưới:", width=120, anchor="w").pack(side="left", pady=2)
-        self.footer_font_slider = ctk.CTkSlider(
-            f_font_frame, from_=20, to=120, number_of_steps=100,
-            command=self.on_footer_font_change
-        )
-        self.footer_font_slider.set(60)
-        self.footer_font_slider.pack(side="left", fill="x", expand=True, padx=5)
-        self.footer_font_label = ctk.CTkLabel(f_font_frame, text="60", width=40, anchor="w")
-        self.footer_font_label.pack(side="left", padx=2)
-        
-        # Header color picker
-        h_color_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        h_color_frame.pack(fill="x", pady=5)
-        ctk.CTkLabel(h_color_frame, text="Màu tiêu đề trên:", width=120, anchor="w").pack(side="left")
-        self.header_color_btn = ctk.CTkButton(
-            h_color_frame, text="🎨 Chọn màu", width=100,
-            command=self.pick_header_color, fg_color="#FFFF00"
-        )
-        self.header_color_btn.pack(side="left", padx=5)
-        
-        # Footer color picker
-        f_color_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        f_color_frame.pack(fill="x", pady=5)
-        ctk.CTkLabel(f_color_frame, text="Màu tiêu đề dưới:", width=120, anchor="w").pack(side="left")
-        self.footer_color_btn = ctk.CTkButton(
-            f_color_frame, text="🎨 Chọn màu", width=100,
-            command=self.pick_footer_color, fg_color="#FFFFFF"
-        )
-        self.footer_color_btn.pack(side="left", padx=5)
-        
-        h_bar_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        h_bar_frame.pack(fill="x", pady=5)
-        ctk.CTkLabel(h_bar_frame, text="Màu thanh trên:", width=120, anchor="w").pack(side="left")
-        self.header_bar_color_btn = ctk.CTkButton(
-            h_bar_frame, text="▮ Chọn màu", width=100,
-            command=self.pick_header_bar_color, fg_color="#FF0000"
-        )
-        self.header_bar_color_btn.pack(side="left", padx=5)
+    # ─────────────────────────────────────────────────────────────────────────
+    #  _append_log  (patched for QTextEdit)
+    # ─────────────────────────────────────────────────────────────────────────
+    def _append_log(self, message):
+        if not hasattr(self, "log"):
+            return
+        try:
+            self.log.insert("end", message)
+            self.log.see("end")
+        except Exception:
+            pass
 
-        f_bar_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        f_bar_frame.pack(fill="x", pady=5)
-        ctk.CTkLabel(f_bar_frame, text="Màu thanh dưới:", width=120, anchor="w").pack(side="left")
-        self.footer_bar_color_btn = ctk.CTkButton(
-            f_bar_frame, text="▮ Chọn màu", width=100,
-            command=self.pick_footer_bar_color, fg_color="#00AEFF"
-        )
-        self.footer_bar_color_btn.pack(side="left", padx=5)
+    # ─────────────────────────────────────────────────────────────────────────
+    #  preview — patched update_preview to use QPixmap
+    # ─────────────────────────────────────────────────────────────────────────
+    def _sync_title_bars(self):
+        # In PySide6 version we draw everything in update_preview() directly;
+        # _header_bar_preview etc. are not separate widgets but handled in canvas.
+        pass
 
-        # AI Gen button
-        btn_gen_title = ctk.CTkButton(self.container, text="✨ AI TẠO TIÊU ĐỀ ẢNH (KHÔNG SỬA SCRIPT)", 
-                                       command=self.auto_gen_title, fg_color="purple")
-        btn_gen_title.pack(pady=10)
+    def update_preview_delayed(self, *args):
+        if hasattr(self, "_preview_timer"):
+            self.after_cancel(self._preview_timer)
+        self._preview_timer = self.after(300, self._update_all_preview)
 
-        # Hidden compat vars (không hiển thị UI)
-        button_frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        self.workflow_enabled = BooleanVar(value=True)
-        self._full_pipeline_mode = BooleanVar(value=True)
-        self.workflow_check = ctk.CTkCheckBox(button_frame, text="WORKFLOW", variable=self.workflow_enabled)
-        self._fp_mode_check = ctk.CTkCheckBox(button_frame, text="FULL PIPELINE", variable=self._full_pipeline_mode)
+    def _update_all_preview(self):
+        self._sync_title_bars()
+        self.update_preview()
 
-        # Log textbox — trong tab 1
-        self.container = self._tab_frames["du_an"]
-        self.log = ctk.CTkTextbox(self.container, height=140, fg_color="#0d0d1f",
-                                   border_color="#1e293b", border_width=1,
-                                   font=("Consolas", 10))
-        self.log.pack(fill="x", pady=(8, 4), padx=2)
-
-        # Resume row — trong tab 1
-        resume_row = ctk.CTkFrame(self.container, fg_color="transparent")
-        resume_row.pack(fill="x", pady=(0, 8))
-        self.btn_resume_pipeline = ctk.CTkButton(
-            resume_row, text="▶️ Tiếp tục từ bước lỗi",
-            height=32, font=("Segoe UI", 11, "bold"),
-            fg_color="#7c3aed", hover_color="#6d28d9",
-            command=self._resume_pipeline,
-        )
-        self.btn_resume_pipeline.pack(side="left", fill="both", expand=True, padx=(0, 4))
-        self.btn_open_script_editor = ctk.CTkButton(
-            resume_row, text="✏️ Script Editor",
-            height=32, font=("Segoe UI", 11),
-            fg_color="#0f766e", hover_color="#115e59",
-            command=self._open_script_editor_manual,
-        )
-        self.btn_open_script_editor.pack(side="left", fill="both", expand=True, padx=(4, 0))
-
-        # ── FULL PIPELINE step labels (ẩn UI, chỉ dùng nội bộ để cập nhật status) ──
-        # fp_frame không pack → toàn bộ section bị ẩn
-        self._fp_step_labels = {}
-        fp_frame = ctk.CTkFrame(self.container, fg_color="#1a1a2e", corner_radius=8)
-        # KHÔNG pack fp_frame → ẩn toàn bộ section bên dưới
-
-        STEP_DISPLAY = [
-            ("METADATA",       "📐 METADATA"),
-            ("TRANSCRIPT",     "🎙️ TRANSCRIPT"),
-            ("SCENE_DETECT",   "🎬 SCENE_DETECT"),
-            ("SUBTITLE_MAP",   "📋 SUBTITLE_MAP"),
-            ("KEYFRAMES",      "🖼️ KEYFRAMES"),
-            ("AI_FULL",        "🤖 AI_FULL"),
-            ("CLIP_FIND",      "✂️ CLIP_FIND"),
-            ("VOICE_SEGMENTS", "🔊 VOICE_SEGMENTS"),
-            ("VOICE_CONCAT",   "🎵 VOICE_CONCAT"),
-            ("VOICE_SRT",      "📝 VOICE_SRT"),
-            ("RENDER_FINAL",   "🎬 RENDER_FINAL"),
-        ]
-
-        steps_grid = ctk.CTkFrame(fp_frame, fg_color="transparent")
-        for col, (key, label) in enumerate(STEP_DISPLAY):
-            cell = ctk.CTkFrame(steps_grid, fg_color="#2a2a3e", corner_radius=4)
-            status_lbl = ctk.CTkLabel(cell, text="⏳", font=("Arial", 11))
-            self._fp_step_labels[key] = status_lbl
-
-        # Skip options (giữ biến để pipeline đọc được)
-        self._fp_skip_transcript = BooleanVar(value=False)
-        self._fp_skip_scene      = BooleanVar(value=False)
-        self._fp_skip_kf         = BooleanVar(value=False)
-
-        # btn_full_pipeline giữ lại để tránh lỗi tham chiếu
-        self.btn_full_pipeline = ctk.CTkButton(
-            fp_frame,
-            text="🚀 CHẠY FULL PIPELINE",
-            command=self._start_full_pipeline_thread,
-        )
-        # KHÔNG pack → ẩn
-        # ── END FULL PIPELINE (hidden) ─────────────────────────────
-
-        # RIGHT SECTION: Preview
-        preview_label = ctk.CTkLabel(right_frame, text="● PREVIEW",
-                                      font=("Segoe UI", 11, "bold"), text_color="#6366f1")
-        preview_label.pack(pady=(10, 4), padx=10, anchor="w")
-
-        # Canvas video preview — đủ cao để chứa video + 2 thanh tiêu đề trên/dưới
-        # Người dùng kéo 2 thanh tiêu đề lên/xuống để chỉnh vị trí
-        self.preview_canvas = Canvas(right_frame, bg="black", width=450, height=340, highlightthickness=0)
-        self.preview_canvas.pack(padx=8, pady=4)
-
-        # Bind mouse events — kéo thả 2 thanh tiêu đề
-        self.preview_canvas.bind("<Button-1>",      self.on_canvas_press)
-        self.preview_canvas.bind("<B1-Motion>",     self.on_canvas_drag)
-        self.preview_canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
-
-        self.preview_info = ctk.CTkLabel(
-            right_frame,
-            text="Chọn video → kéo thanh tiêu đề lên/xuống để căn vị trí",
-            text_color="gray", font=("Arial", 10), wraplength=430,
-        )
-        self.preview_info.pack(pady=(2, 2))
-
-        # ── Voice selection (dưới preview, chia 2 dòng) ──────────────────────
-        voice_row1 = ctk.CTkFrame(right_frame, fg_color="transparent")
-        voice_row1.pack(fill="x", padx=10, pady=(4, 2))
-        ctk.CTkLabel(voice_row1, text="Ngôn ngữ:", width=72, anchor="w").pack(side="left")
-        self.tts_language = ctk.CTkComboBox(
-            voice_row1, values=["Tiếng Việt", "English"],
-            state="readonly", width=120, command=self.on_tts_language_change,
-        )
-        self.tts_language.set("Tiếng Việt")
-        self.tts_language.pack(side="left", padx=(0, 4))
-
-        voice_row2 = ctk.CTkFrame(right_frame, fg_color="transparent")
-        voice_row2.pack(fill="x", padx=10, pady=(0, 4))
-        self.voice_choice = ctk.CTkComboBox(
-            voice_row2, values=self.get_voice_options("Tiếng Việt"),
-            state="readonly", width=270,
-        )
-        self.voice_choice.set("Review nữ - vi-VN-HoaiMyNeural")
-        self.voice_choice.pack(side="left", padx=(0, 4))
-        # voice_row alias dùng cho btn_preview_voice pack bên dưới
-        voice_row = voice_row2
-
-        self.btn_preview_voice = ctk.CTkButton(
-            voice_row,
-            text="🎧 Nghe thử",
-            width=90,
-            fg_color="#0f766e",
-            hover_color="#115e59",
-            command=self._preview_voice_sample,
-        )
-        self.btn_preview_voice.pack(side="left")
-
-    def create_label(self, text):
-        """Section header — gọn, chỉ là label có màu accent."""
-        ctk.CTkLabel(
-            self.container, text=text,
-            font=("Segoe UI", 11, "bold"),
-            text_color="#818cf8",
-            anchor="w",
-        ).pack(fill="x", padx=4, pady=(10, 2))
-
-    def create_file_input(self, label_text, is_dir=False):
-        frame = ctk.CTkFrame(self.container, fg_color="#16213e", corner_radius=6)
-        frame.pack(fill="x", pady=2)
-        ctk.CTkLabel(frame, text=label_text, width=120, anchor="w",
-                     font=("Segoe UI", 11), text_color="#94a3b8").pack(side="left", padx=(10, 0), pady=3)
-        entry = ctk.CTkEntry(frame)
-        entry.pack(side="left", fill="x", expand=True, padx=5)
-        lower_label = label_text.lower()
-        def on_change(event=None):
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Color pickers — patched for QColorDialog
+    # ─────────────────────────────────────────────────────────────────────────
+    def pick_header_color(self):
+        color = colorchooser.askcolor(color=self.header_color, title="Chọn màu cho tiêu đề trên")
+        if color[1]:
+            r,g,b = int(color[1][1:3],16), int(color[1][3:5],16), int(color[1][5:7],16)
+            self.header_color = (r,g,b)
+            self.header_color_btn.configure(fg_color=color[1])
             self.update_preview_delayed()
-            if ("video" in lower_label and not is_dir) or (is_dir and any(key in lower_label for key in ("lưu", "output", "thư mục"))):
-                self._sync_cut_related_paths()
-        entry.bind("<KeyRelease>", on_change)
-        
-        def browse():
-            if is_dir:
-                p = filedialog.askdirectory()
-            elif "video" in lower_label:
-                p = filedialog.askopenfilename(
-                    title="Chọn video gốc",
-                    filetypes=[
-                        ("Video files", "*.mp4 *.mkv *.mov *.avi *.webm *.m4v"),
-                        ("All files", "*.*"),
-                    ],
-                )
-            elif "srt" in lower_label:
-                p = filedialog.askopenfilename(
-                    title="Chọn SRT thoại gốc đã dịch",
-                    filetypes=[("SRT subtitles", "*.srt"), ("All files", "*.*")],
-                )
-            elif "key" in lower_label:
-                p = filedialog.askopenfilename(
-                    title="Chọn file Gemini API keys",
-                    filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-                )
-            else:
-                p = filedialog.askopenfilename()
-            if p:
-                try:
-                    if (not is_dir) and ("video" in lower_label):
-                        ext = os.path.splitext(p)[1].lower()
-                        if ext == ".srt":
-                            if hasattr(self, 'srt_path'):
-                                self._set_source_srt_path(p, auto_detected=False)
-                            if hasattr(self, 'preview_info'):
-                                self.preview_info.configure(
-                                    text="ℹ️ Bạn vừa chọn SRT. File đã được chuyển sang ô SRT thoại nguồn.",
-                                    text_color="orange"
-                                )
-                            return
-                        if ext not in [".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"]:
-                            if hasattr(self, 'preview_info'):
-                                self.preview_info.configure(
-                                    text="❌ Video gốc phải là file video (.mp4/.mkv/.mov/.avi)",
-                                    text_color="red"
-                                )
-                            return
-                    entry.delete(0, "end")
-                    entry.insert(0, p)
-                    if hasattr(self, 'srt_path') and entry == self.srt_path:
-                        self.source_srt_path = p
-                    if hasattr(self, "video_path") and entry == self.video_path:
-                        self._ensure_video_output_dir(p, force_new=False, update_entries=True)
-                        self._sync_cut_related_paths(p)
-                    elif is_dir and hasattr(self, "video_path") and (
-                        entry == self.output_dir or entry == self.cut_output_dir
-                    ):
-                        self._sync_cut_related_paths()
-                    if (not is_dir) and ("video" in label_text.lower() or "video gốc" in label_text.lower()):
-                        basename = os.path.splitext(os.path.basename(p))[0]
-                        if hasattr(self, 'movie_name') and self.movie_name.get().strip() == "":
-                            self.movie_name.delete(0, "end")
-                            self.movie_name.insert(0, basename)
-                        # Load video preview
-                        self.current_video_path = p
-                        self.save_config({"video_source": p})  # lưu để auto-load lần sau
-                        if hasattr(self, 'movie_description'):
-                            self._set_textbox_text(self.movie_description, "")
-                        if hasattr(self, 'review_script_box'):
-                            self._set_textbox_text(self.review_script_box, "")
-                        if hasattr(self, 'review_srt_box'):
-                            self._set_textbox_text(self.review_srt_box, "")
-                        if hasattr(self, 'srt_path'):
-                            self.srt_path.delete(0, "end")
-                            self.source_srt_path = ""
-                            self._ensure_source_srt(prompt_if_missing=False)
-                        threading.Thread(target=self.load_video_preview, daemon=True).start()
-                except Exception as e:
-                    print(f"Error: {e}")
-        
-        ctk.CTkButton(frame, text="📂", width=40,
-                      fg_color="#6366f1", hover_color="#4f46e5",
-                      command=browse).pack(side="right", padx=6, pady=2)
-        return entry
+
+    def pick_footer_color(self):
+        color = colorchooser.askcolor(color=self.footer_color, title="Chọn màu cho tiêu đề dưới")
+        if color[1]:
+            r,g,b = int(color[1][1:3],16), int(color[1][3:5],16), int(color[1][5:7],16)
+            self.footer_color = (r,g,b)
+            self.footer_color_btn.configure(fg_color=color[1])
+            self.update_preview_delayed()
+
+    def pick_header_bar_color(self):
+        color = colorchooser.askcolor(color=self.header_bar_color, title="Chọn màu thanh trên")
+        if color[1]:
+            r,g,b = int(color[1][1:3],16), int(color[1][3:5],16), int(color[1][5:7],16)
+            self.header_bar_color = (r,g,b)
+            self.header_bar_color_btn.configure(fg_color=color[1])
+            self.update_preview_delayed()
+
+    def pick_footer_bar_color(self):
+        color = colorchooser.askcolor(color=self.footer_bar_color, title="Chọn màu thanh dưới")
+        if color[1]:
+            r,g,b = int(color[1][1:3],16), int(color[1][3:5],16), int(color[1][5:7],16)
+            self.footer_bar_color = (r,g,b)
+            self.footer_bar_color_btn.configure(fg_color=color[1])
+            self.update_preview_delayed()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  _open_latest_output  — patched messagebox
+    # ─────────────────────────────────────────────────────────────────────────
+    def _open_latest_output(self):
+        import glob
+        candidates = []
+        out_dir = ""
+        try: out_dir = self.output_dir.get().strip() if hasattr(self, "output_dir") else ""
+        except Exception: pass
+        if not out_dir:
+            vid = ""
+            try: vid = self.video_path.get().strip() if hasattr(self, "video_path") else ""
+            except Exception: pass
+            if vid: out_dir = os.path.dirname(vid)
+        if out_dir and os.path.isdir(out_dir):
+            for ext in ("*.mp4", "*.mkv", "*.mov"):
+                candidates += glob.glob(os.path.join(out_dir, "**", ext), recursive=True)
+                candidates += glob.glob(os.path.join(out_dir, ext))
+        if not candidates:
+            messagebox.showinfo("Chưa có video output",
+                                "Chưa tìm thấy video output. Hãy chạy pipeline trước!")
+            return
+        latest = max(candidates, key=os.path.getmtime)
+        try:
+            os.startfile(latest)
+        except Exception:
+            subprocess.Popen(["explorer", "/select,", latest])
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Clipboard shims (tk-style → Qt)
+    # ─────────────────────────────────────────────────────────────────────────
+    def _copy_with_tk_clipboard(self, text, timeout_seconds=3.0):
+        result = {"ok": False, "error": ""}
+        try:
+            QApplication.clipboard().setText(str(text))
+            result["ok"] = True
+        except Exception as exc:
+            result["error"] = str(exc)
+        return result
+
+    def _read_system_clipboard_text(self):
+        if PYPERCLIP_AVAILABLE:
+            try: return pyperclip.paste() or ""
+            except Exception: pass
+        try: return QApplication.clipboard().text()
+        except Exception: pass
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.run(["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="ignore", timeout=5, creationflags=flags)
+            if proc.returncode == 0: return proc.stdout or ""
+        except Exception: pass
+        return ""
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  ScriptEditorWindow compat: winfo_exists
+    # ─────────────────────────────────────────────────────────────────────────
+    def _se_winfo_exists(self, w):
+        if w is None: return False
+        if hasattr(w, "winfo_exists"): return w.winfo_exists()
+        if hasattr(w, "isVisible"):    return w.isVisible()
+        return False
+
+    def _open_latest_output(self):
+        """Mở file video output mới nhất bằng media player mặc định."""
+        import glob, subprocess
+        # Tìm video output: ưu tiên output_dir từ UI, sau đó tìm cạnh video gốc
+        candidates = []
+        out_dir = ""
+        try:
+            out_dir = self.output_dir.get().strip() if hasattr(self, "output_dir") else ""
+        except Exception:
+            pass
+        if not out_dir:
+            vid = ""
+            try:
+                vid = self.video_path.get().strip() if hasattr(self, "video_path") else ""
+            except Exception:
+                pass
+            if vid:
+                out_dir = os.path.dirname(vid)
+        if out_dir and os.path.isdir(out_dir):
+            for ext in ("*.mp4", "*.mkv", "*.mov"):
+                candidates += glob.glob(os.path.join(out_dir, "**", ext), recursive=True)
+                candidates += glob.glob(os.path.join(out_dir, ext))
+        if not candidates:
+            QMessageBox.information(self, "Chưa có video output",
+                                    "Chưa tìm thấy video output. Hãy chạy pipeline trước!")
+            return
+        # Lấy file mới nhất
+        latest = max(candidates, key=os.path.getmtime)
+        try:
+            os.startfile(latest)  # Windows: mở bằng player mặc định
+        except Exception:
+            subprocess.Popen(["explorer", "/select,", latest])
 
     def _safe_output_slug(self, value: str, max_len: int = 70) -> str:
         base = os.path.splitext(os.path.basename(str(value or "").strip()))[0] or "video"
@@ -1073,15 +1864,6 @@ class App(ctk.CTk):
             except Exception:
                 pass
         return out_dir
-
-    def create_text_area(self, label_text, placeholder, height=80):
-        frame = ctk.CTkFrame(self.container, fg_color="#16213e", corner_radius=6)
-        frame.pack(fill="x", pady=2)
-        ctk.CTkLabel(frame, text=label_text, width=120, anchor="nw",
-                     font=("Segoe UI", 11), text_color="#94a3b8").pack(side="left", padx=(10, 0), pady=4)
-        textbox = ctk.CTkTextbox(frame, height=height, fg_color="#0f172a", border_color="#334155", border_width=1)
-        textbox.pack(side="left", fill="x", expand=True, padx=8, pady=4)
-        return textbox
 
     def _get_textbox_text(self, textbox):
         if not textbox:
@@ -1623,6 +2405,12 @@ class App(ctk.CTk):
             self._set_textbox_text(self.review_srt_box, "")
 
     def _thread_safe_log(self, message):
+        match = re.search(r'\[(?:SCENE_PROGRESS|JOB_PROGRESS)\] (-?\d+)\|([^\r\n]+)',str(message))
+        if match:
+            percent, detail = int(match.group(1)),match.group(2)
+            if percent < 0: percent = None
+            self.after(0,lambda p=percent,d=detail:self._set_pipeline_progress(p,d))
+            return
         if not hasattr(self, "after"):
             self._append_log(message)
             return
@@ -1630,6 +2418,14 @@ class App(ctk.CTk):
             self.after(0, lambda msg=message: self._append_log(msg))
         except Exception:
             self._append_log(message)
+
+    def _set_pipeline_progress(self, percent, detail):
+        self._pipeline_progress_label.setText(detail)
+        if percent is None:
+            self._pipeline_progress_bar.setRange(0,0)
+        else:
+            self._pipeline_progress_bar.setRange(0,100)
+            self._pipeline_progress_bar.setValue(max(0,min(100,percent)))
 
     def _set_gemini_login_ui(self, text, color="#94a3b8", running=None):
         """Update Gemini login widgets without touching destroyed Tk widgets."""
@@ -1749,160 +2545,13 @@ class App(ctk.CTk):
     def _has_gemini_key(self):
         return bool(self._get_gemini_keys())
 
-    def create_entry(self, label_text, placeholder, show=None):
-        frame = ctk.CTkFrame(self.container, fg_color="#16213e", corner_radius=6)
-        frame.pack(fill="x", pady=2)
-        ctk.CTkLabel(frame, text=label_text, width=120, anchor="w",
-                     font=("Segoe UI", 11), text_color="#94a3b8").pack(side="left", padx=(10, 0))
-        entry_kwargs = {"placeholder_text": placeholder, "fg_color": "#0f172a",
-                        "border_color": "#334155", "border_width": 1}
-        if show:
-            entry_kwargs["show"] = show
-        entry = ctk.CTkEntry(frame, **entry_kwargs)
-        entry.pack(side="left", fill="x", expand=True, padx=8, pady=3)
-        entry.bind("<KeyRelease>", lambda e: self.update_preview_delayed())
-        return entry
-
     def load_video_preview(self):
-        """Load first frame from video và resize canvas theo tỷ lệ video."""
-        print(f"[PREVIEW] load_video_preview called, path={self.current_video_path!r}")
-        try:
-            if not self.current_video_path:
-                self.after(0, lambda: self.preview_info.configure(text="❌ Video không tồn tại", text_color="red"))
-                return
-
-            video_path = os.path.normpath(os.path.abspath(self.current_video_path))
-            if not os.path.exists(video_path):
-                self.after(0, lambda: self.preview_info.configure(text=f"❌ Video không tồn tại: {video_path}", text_color="red"))
-                return
-
-            pil_frame = None
-            cap = cv2.VideoCapture(video_path)
-            try:
-                if cap.isOpened():
-                    fps = cap.get(cv2.CAP_PROP_FPS) or 25
-                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-                    # Thử lấy frame ở các mốc thời gian — tránh màn hình đen đầu video
-                    seek_seconds = [3, 8, 15, 30, 1, 0]
-                    for sec in seek_seconds:
-                        target = int(sec * fps)
-                        if total_frames > 0 and target >= total_frames:
-                            continue
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, target)
-                        ok, frame = cap.read()
-                        if not ok or frame is None:
-                            continue
-                        # Kiểm tra frame có tối quá không (mean < 15 = đen)
-                        mean_brightness = frame.mean()
-                        if mean_brightness < 15 and sec != seek_seconds[-1]:
-                            continue  # bỏ qua frame đen, thử tiếp
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        pil_frame = Image.fromarray(frame_rgb)
-                        print(f"[PREVIEW] Dùng frame @{sec}s, brightness={mean_brightness:.1f}")
-                        break
-            finally:
-                cap.release()
-
-            if pil_frame is None:
-                ffmpeg_exe = FFmpegUtils.ffmpeg_executable()
-                if not ffmpeg_exe:
-                    raise FileNotFoundError("OpenCV không đọc được video và ffmpeg.exe không có trong PATH")
-                # Thử các mốc thời gian để tránh frame đen
-                for seek_sec in [5, 10, 3, 1, 0]:
-                    cmd = [
-                        ffmpeg_exe, '-hide_banner', '-loglevel', 'error',
-                        '-ss', str(seek_sec),
-                        '-i', video_path,
-                        '-vframes', '1',
-                        '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1'
-                    ]
-                    proc = subprocess.Popen(
-                        cmd,
-                        **FFmpegUtils.subprocess_kwargs(
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                        ),
-                    )
-                    frame_bytes, _ = proc.communicate()
-                    if frame_bytes:
-                        candidate = Image.open(io.BytesIO(frame_bytes)).convert('RGB')
-                        import numpy as np
-                        if np.array(candidate).mean() > 15 or seek_sec == 0:
-                            pil_frame = candidate
-                            print(f"[PREVIEW] ffmpeg frame @{seek_sec}s")
-                            break
-                if pil_frame is None:
-                    raise RuntimeError("Không thể đọc frame từ video")
-
-            self.preview_source_size = pil_frame.size
-            orig_w, orig_h = pil_frame.size
-
-            # Fit vào canvas 440px wide (right_frame 460 - padx 8*2 = 444)
-            PREVIEW_MAX_W = 440
-            PREVIEW_MAX_H = 500
-            scale = min(PREVIEW_MAX_W / orig_w, PREVIEW_MAX_H / orig_h)
-            self.preview_scale = scale
-            new_w = int(orig_w * scale)
-            new_h = int(orig_h * scale)
-
-            frame_resized = pil_frame.resize((new_w, new_h), Image.LANCZOS)
-            _canvas_img = frame_resized.copy()
-            _total_w    = new_w
-            _total_h    = new_h
-
-            self.preview_frame_box = (0, 0, new_w, new_h)
-            self.header_x = new_w // 2
-            self.header_y = max(20, int(new_h * 0.10))
-            self.footer_x = new_w // 2
-            self.footer_y = min(new_h - 20, int(new_h * 0.88))
-
-            print(f"[PREVIEW] frame ready: {new_w}x{new_h} (orig {orig_w}x{orig_h}, scale={scale:.3f})")
-
-            def _apply_preview():
-                try:
-                    self.preview_image = _canvas_img
-                    self.preview_canvas.configure(width=_total_w, height=_total_h)
-                    self.update_idletasks()
-                    # Cập nhật text thanh tiêu đề ngoài
-                    self._sync_title_bars()
-                    self.update_preview()
-                    self.preview_info.configure(
-                        text=f"✓ {orig_w}×{orig_h} | 📍 Chỉnh text tiêu đề ở ô bên trái",
-                        text_color="green"
-                    )
-                    print(f"[PREVIEW] OK — canvas {_total_w}x{_total_h}")
-                except Exception as _e:
-                    import traceback
-                    print(f"[PREVIEW apply error] {traceback.format_exc()}")
-                    try:
-                        self.preview_info.configure(text=f"❌ {_e}", text_color="red")
-                    except Exception:
-                        pass
-
-            # Gọi after() an toàn từ thread — bắt RuntimeError nếu mainloop chưa start
-            try:
-                self.after(0, _apply_preview)
-            except RuntimeError:
-                # mainloop chưa ready — thử lại sau 1s
-                import threading as _th
-                import time as _tm
-                def _retry():
-                    _tm.sleep(1.0)
-                    try:
-                        self.after(0, _apply_preview)
-                    except Exception:
-                        pass
-                _th.Thread(target=_retry, daemon=True).start()
-
-        except Exception as e:
-            import traceback
-            print(f"[PREVIEW load error] {traceback.format_exc()}")
-            err = str(e)
-            try:
-                self.after(0, lambda err=err: self.preview_info.configure(
-                    text=f"❌ Lỗi load video: {err}", text_color="red"
-                ))
-            except RuntimeError:
-                pass  # mainloop chưa ready — bỏ qua, không crash
+        # Callers may be worker threads; QMediaPlayer belongs to the UI thread.
+        path = getattr(self, "current_video_path", "")
+        if QThread.currentThread() == self.thread():
+            self._load_native_preview(path)
+        else:
+            self._ui_call.emit(lambda: self._load_native_preview(path))
 
     def on_header_font_change(self, value):
         """Callback when header font size slider changes"""
@@ -2043,7 +2692,7 @@ class App(ctk.CTk):
         voice_id    = self._resolve_voice_id(voice_label, lang_label)
 
         # Luôn dùng câu mẫu tiếng Việt để người dùng nghe và chọn giọng
-        sample_text = "Xin chào! Đây là giọng đọc mẫu của ứng dụng AutoRecapPro. Giọng này sẽ được dùng để lồng tiếng cho video recap."
+        sample_text = "Xin chào! Đây là giọng đọc mẫu của ứng dụng BOOM Review. Giọng này sẽ được dùng để lồng tiếng cho video recap."
 
         # Disable nút trong lúc phát để tránh spam
         if hasattr(self, "btn_preview_voice"):
@@ -2145,13 +2794,10 @@ class App(ctk.CTk):
     def _show_error(self, msg):
         """Hiển thị popup lỗi nhỏ."""
         try:
-            import customtkinter as ctk
-            top = ctk.CTkToplevel(self)
-            top.title("Lỗi")
-            top.geometry("420x120")
-            top.grab_set()
-            ctk.CTkLabel(top, text=msg, wraplength=390).pack(pady=20, padx=10)
-            ctk.CTkButton(top, text="Đóng", command=top.destroy, width=80).pack()
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle("Lỗi")
+            dlg.setText(msg)
+            dlg.exec()
         except Exception:
             print(f"[ERROR] {msg}")
 
@@ -2331,52 +2977,11 @@ class App(ctk.CTk):
         return align_map.get(align_str, "mm")
 
 
-    def on_canvas_press(self, event):
-        """Mouse press — detect kéo thanh header hay footer."""
-        bar_h = getattr(self, "_preview_bar_h", 38)
-        hy = getattr(self, "_bar_header_y", bar_h // 2)
-        fy = getattr(self, "_bar_footer_y", 300)
-        # Click trong vùng bar (±bar_h//2)
-        if abs(event.y - hy) <= bar_h // 2 + 5:
-            self.dragging = "header"
-        elif abs(event.y - fy) <= bar_h // 2 + 5:
-            self.dragging = "footer"
+    def _toggle_vplay(self):
+        if self._vplay_paused:
+            self._start_vplay()
         else:
-            self.dragging = None
-
-    def on_canvas_drag(self, event):
-        """Mouse drag — cập nhật vị trí thanh tiêu đề."""
-        total_h = getattr(self, "_preview_total_h", 300)
-        bar_h   = getattr(self, "_preview_bar_h", 38)
-        if self.dragging == "header":
-            self._bar_header_y = max(bar_h // 2, min(total_h - bar_h // 2, event.y))
-            self.update_preview()
-        elif self.dragging == "footer":
-            self._bar_footer_y = max(bar_h // 2, min(total_h - bar_h // 2, event.y))
-            self.update_preview()
-
-    def on_canvas_release(self, event):
-        """Mouse release — lưu vị trí kéo thành tỷ lệ cho video_engine."""
-        self.dragging = None
-        vid_h    = getattr(self, "_preview_vid_h",    220)
-        bar_h    = getattr(self, "_preview_bar_h",     38)
-        total_h  = getattr(self, "_preview_total_h",  296)
-
-        hy = getattr(self, "_bar_header_y", bar_h // 2)
-        fy = getattr(self, "_bar_footer_y", bar_h + vid_h + bar_h // 2)
-
-        # Map vị trí kéo sang tỷ lệ 0.0-1.0 trong tổng chiều cao canvas
-        # rồi clamp vào vùng padding an toàn
-        if total_h > 0:
-            hy_ratio = hy / total_h
-            fy_ratio = fy / total_h
-        else:
-            hy_ratio = 0.12
-            fy_ratio = 0.88
-
-        # Clamp: header <= 0.14 (vùng padding trên), footer >= 0.86 (vùng padding dưới)
-        self.header_y = max(0.02, min(0.14, hy_ratio))
-        self.footer_y = max(0.86, min(0.98, fy_ratio))
+            self._stop_vplay()
 
     def update_preview_delayed(self, *args):
         """Debounced preview update"""
@@ -2450,247 +3055,10 @@ class App(ctk.CTk):
             pass
 
     def update_preview(self):
-        """Hiển thị frame video + 2 thanh tiêu đề lên canvas — có thể kéo thả."""
-        if self.preview_image is None:
-            # Vẽ placeholder với 2 thanh tiêu đề mẫu trên nền đen
-            self._draw_preview_placeholder()
-            return
-        try:
-            orig_w, orig_h = self.preview_image.size
-            # Canvas width cố định 440, tính video height
-            canvas_w = 440
-            scale    = canvas_w / orig_w
-            vid_h    = int(orig_h * scale)
-
-            # Chiều cao mỗi thanh tiêu đề
-            # FFmpeg adds a 200px title band at 1920px reference width.
-            # Scale that real source band into the preview canvas.
-            BAR_H = max(30, int(round(200 * (orig_w / 1920.0) * scale)))
-
-            # Tổng canvas height = bar_trên + video + bar_dưới
-            total_h = BAR_H + vid_h + BAR_H
-
-            # Resize video cho khớp canvas_w
-            vid_img = self.preview_image.resize((canvas_w, vid_h), Image.LANCZOS)
-
-            # Tạo composite image
-            composite = Image.new("RGB", (canvas_w, total_h), (0, 0, 0))
-            composite.paste(vid_img, (0, BAR_H))
-
-            draw = ImageDraw.Draw(composite)
-
-            # Màu thanh
-            hbar_color = getattr(self, "header_bar_color", (255, 0, 0))
-            fbar_color = getattr(self, "footer_bar_color",  (0, 180, 216))
-            htxt_color = getattr(self, "header_color",      (255, 255, 0))
-            ftxt_color = getattr(self, "footer_color",      (255, 255, 255))
-
-            header_txt = (self.header_text.get() if hasattr(self, "header_text") else "") or "TIÊU ĐỀ TRÊN"
-            footer_txt = (self.footer_text.get() if hasattr(self, "footer_text") else "") or "TIÊU ĐỀ DƯỚI"
-
-            # Dung cung layout voi FFmpeg: font co san de doc va title dai
-            # duoc xuong toi da 2 dong thay vi ep thanh mot dong chu li ti.
-            h_lines, h_render_fs = VideoEngine._prepare_title_layout(
-                header_txt, getattr(self, "header_font_size", 80),
-                min_font_size=20, frame_width=orig_w, max_lines=2,
-                auto_fit=True,
-            )
-            f_lines, f_render_fs = VideoEngine._prepare_title_layout(
-                footer_txt, getattr(self, "footer_font_size", 60),
-                min_font_size=20, frame_width=orig_w, max_lines=2,
-                auto_fit=True,
-            )
-            header_preview_text = "\n".join(h_lines)
-            footer_preview_text = "\n".join(f_lines)
-            h_fs = max(8, int(round(h_render_fs * scale)))
-            f_fs = max(8, int(round(f_render_fs * scale)))
-
-            try:
-                h_font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", h_fs)
-            except Exception:
-                h_font = ImageFont.load_default()
-            try:
-                f_font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", f_fs)
-            except Exception:
-                f_font = ImageFont.load_default()
-
-            # Vẽ thanh tiêu đề TRÊN (y = 0 → BAR_H)
-            # header_y trong range 0..BAR_H+vid_h — mặc định giữa bar trên
-            # Giữ header_y để user kéo được (init = BAR_H//2)
-            if not hasattr(self, "_bar_header_y") or self._bar_header_y is None:
-                self._bar_header_y = BAR_H // 2
-            if not hasattr(self, "_bar_footer_y") or self._bar_footer_y is None:
-                self._bar_footer_y = BAR_H + vid_h + BAR_H // 2
-
-            # Clamp vị trí
-            hbar_y = max(0, min(BAR_H + vid_h, int(self._bar_header_y)))
-            fbar_y = max(0, min(total_h,        int(self._bar_footer_y)))
-
-            # Vẽ bar header
-            draw.rectangle([0, hbar_y - BAR_H//2, canvas_w, hbar_y + BAR_H//2], fill=hbar_color)
-            # Text header căn giữa bar
-            tbbox = draw.multiline_textbbox((0, 0), header_preview_text, font=h_font, spacing=2, align="center")
-            tw = tbbox[2] - tbbox[0]
-            tx = (canvas_w - tw) // 2
-            ty = hbar_y - (tbbox[3] - tbbox[1]) // 2
-            draw.multiline_text(
-                (tx, ty), header_preview_text, fill=htxt_color,
-                font=h_font, spacing=2, align="center",
-            )
-
-            # Vẽ bar footer
-            draw.rectangle([0, fbar_y - BAR_H//2, canvas_w, fbar_y + BAR_H//2], fill=fbar_color)
-            tbbox2 = draw.multiline_textbbox((0, 0), footer_preview_text, font=f_font, spacing=2, align="center")
-            tw2 = tbbox2[2] - tbbox2[0]
-            tx2 = (canvas_w - tw2) // 2
-            ty2 = fbar_y - (tbbox2[3] - tbbox2[1]) // 2
-            draw.multiline_text(
-                (tx2, ty2), footer_preview_text, fill=ftxt_color,
-                font=f_font, spacing=2, align="center",
-            )
-
-            # Highlight khi kéo (viền vàng)
-            if getattr(self, "dragging", None) == "header":
-                draw.rectangle([0, hbar_y - BAR_H//2, canvas_w, hbar_y + BAR_H//2],
-                                outline=(255, 220, 0), width=2)
-            elif getattr(self, "dragging", None) == "footer":
-                draw.rectangle([0, fbar_y - BAR_H//2, canvas_w, fbar_y + BAR_H//2],
-                                outline=(255, 220, 0), width=2)
-
-            # Cập nhật canvas
-            photo = ImageTk.PhotoImage(composite)
-            self.preview_canvas.configure(width=canvas_w, height=total_h)
-            self.preview_canvas.delete("all")
-            self.preview_canvas.create_image(0, 0, image=photo, anchor="nw")
-            self.preview_canvas.image = photo
-
-            # Lưu để drag dùng
-            self._preview_bar_h  = BAR_H
-            self._preview_vid_h  = vid_h
-            self._preview_total_h = total_h
-            self._preview_canvas_w = canvas_w
-
-            # Sync lại header_y/footer_y để drag đúng
-            self.header_x = canvas_w // 2
-            self.header_y = hbar_y
-            self.footer_x = canvas_w // 2
-            self.footer_y = fbar_y
-
-            overflow = []
-            if len(h_lines) > 2:
-                overflow.append("tiêu đề trên quá dài, hãy rút ngắn nội dung")
-            if len(f_lines) > 2:
-                overflow.append("tiêu đề dưới quá dài, hãy rút ngắn nội dung")
-
-            self.preview_info.configure(
-                text="📍 Kéo thanh tiêu đề lên/xuống để chỉnh vị trí",
-                text_color="green"
-            )
-            if overflow:
-                self.preview_info.configure(
-                    text="CẢNH BÁO: " + " | ".join(overflow),
-                    text_color="#ef4444",
-                )
-        except Exception as e:
-            import traceback
-            print(f"[update_preview error] {traceback.format_exc()}")
-            self.preview_info.configure(text=f"Lỗi preview: {e}", text_color="red")
+        self._sync_graphics_preview()
 
     def _draw_preview_placeholder(self):
-        """Vẽ placeholder khi chưa có video."""
-        try:
-            BAR_H   = 38
-            VID_H   = 220
-            W       = 440
-            total_h = BAR_H + VID_H + BAR_H
-
-            img  = Image.new("RGB", (W, total_h), (15, 15, 20))
-            draw = ImageDraw.Draw(img)
-
-            hbar = getattr(self, "header_bar_color", (220, 20,  20))
-            fbar = getattr(self, "footer_bar_color",  (0,  180, 216))
-            htxt = getattr(self, "header_color",      (255, 255, 0))
-            ftxt = getattr(self, "footer_color",      (255, 255, 255))
-
-            header_txt = (self.header_text.get() if hasattr(self, "header_text") else "") or "TIÊU ĐỀ TRÊN"
-            footer_txt = (self.footer_text.get() if hasattr(self, "footer_text") else "") or "TIÊU ĐỀ DƯỚI"
-
-            # Gia lap khung render rong 1920px khi chua co video. Khong auto-fit:
-            # tieu de qua dai se bi cat giong ket qua render that.
-            scale = W / 1920.0
-            h_lines, h_render_fs = VideoEngine._prepare_title_layout(
-                header_txt, getattr(self, "header_font_size", 80),
-                min_font_size=20, frame_width=1920, max_lines=2,
-                auto_fit=True,
-            )
-            f_lines, f_render_fs = VideoEngine._prepare_title_layout(
-                footer_txt, getattr(self, "footer_font_size", 60),
-                min_font_size=20, frame_width=1920, max_lines=2,
-                auto_fit=True,
-            )
-            header_preview_text = "\n".join(h_lines)
-            footer_preview_text = "\n".join(f_lines)
-            try:
-                h_font = ImageFont.truetype(
-                    "C:/Windows/Fonts/arial.ttf",
-                    max(8, int(round(h_render_fs * scale))),
-                )
-            except Exception:
-                h_font = ImageFont.load_default()
-            try:
-                f_font = ImageFont.truetype(
-                    "C:/Windows/Fonts/arial.ttf",
-                    max(8, int(round(f_render_fs * scale))),
-                )
-            except Exception:
-                f_font = ImageFont.load_default()
-
-            draw.rectangle([0, 0, W, BAR_H], fill=hbar)
-            bb = draw.multiline_textbbox((0,0), header_preview_text, font=h_font, spacing=2, align="center")
-            header_w = bb[2] - bb[0]
-            draw.multiline_text(
-                ((W-header_w)//2, (BAR_H-(bb[3]-bb[1]))//2),
-                header_preview_text, fill=htxt, font=h_font, spacing=2, align="center",
-            )
-
-            draw.rectangle([0, BAR_H, W, BAR_H+VID_H], fill=(20, 20, 25))
-            draw.text((W//2-80, BAR_H+VID_H//2-10), "Chọn video để xem preview", fill=(80,80,90))
-
-            draw.rectangle([0, BAR_H+VID_H, W, total_h], fill=fbar)
-            bb2 = draw.multiline_textbbox((0,0), footer_preview_text, font=f_font, spacing=2, align="center")
-            footer_w = bb2[2] - bb2[0]
-            draw.multiline_text(
-                ((W-footer_w)//2, BAR_H+VID_H+(BAR_H-(bb2[3]-bb2[1]))//2),
-                footer_preview_text, fill=ftxt, font=f_font, spacing=2, align="center",
-            )
-
-            photo = ImageTk.PhotoImage(img)
-            self.preview_canvas.configure(width=W, height=total_h)
-            self.preview_canvas.delete("all")
-            self.preview_canvas.create_image(0, 0, image=photo, anchor="nw")
-            self.preview_canvas.image = photo
-
-            self._bar_header_y = BAR_H // 2
-            self._bar_footer_y = BAR_H + VID_H + BAR_H // 2
-
-            overflow = []
-            if len(h_lines) > 2:
-                overflow.append("tiêu đề trên quá dài, hãy rút ngắn nội dung")
-            if len(f_lines) > 2:
-                overflow.append("tiêu đề dưới quá dài, hãy rút ngắn nội dung")
-            if hasattr(self, "preview_info"):
-                if overflow:
-                    self.preview_info.configure(
-                        text="CẢNH BÁO: " + " | ".join(overflow),
-                        text_color="#ef4444",
-                    )
-                else:
-                    self.preview_info.configure(
-                        text="Chọn video để xem preview chính xác",
-                        text_color="green",
-                    )
-        except Exception:
-            pass
+        self._sync_graphics_preview()
 
     def auto_gen_title(self):
         def _gen_title_thread():
@@ -2738,6 +3106,8 @@ class App(ctk.CTk):
         Callback chạy trên pipeline thread → cần dùng threading.Event để chờ
         UI thread mở cửa sổ và user xác nhận.
         """
+        if not self._manual_script_review.isChecked():
+            return None
         import threading as _threading
 
         app_ref = self  # reference tới App instance
@@ -2745,6 +3115,7 @@ class App(ctk.CTk):
         def callback(pipeline) -> bool:
             """Chạy trên worker thread — phải chờ main thread."""
             event = _threading.Event()
+            pipeline.script_review_error = ''
             result_holder = [False]  # chỉ tiếp tục khi user bấm xác nhận rõ ràng
 
             def _open_editor():
@@ -2772,6 +3143,7 @@ class App(ctk.CTk):
                     # Editor không modal: có thể thu nhỏ để dùng app khác rồi mở lại.
                 except Exception as e:
                     result_holder[0] = False
+                    pipeline.script_review_error = str(e)
                     pipeline._log(f"   ⚠️ Không mở được Script Editor: {e} → dừng, không tạo voice\n")
                     event.set()
 
@@ -2880,6 +3252,7 @@ class App(ctk.CTk):
             voice_id = self._voice_id(self.voice_choice.get()) if hasattr(self, "voice_choice") else "vi-VN-HoaiMyNeural"
 
             pipeline = FullPipeline(
+                preview_design=self._preview_design_settings(),
                 video_path=video_path,
                 output_dir=output_dir,
                 movie_title=self.movie_name.get().strip() if hasattr(self, "movie_name") else "",
@@ -4330,7 +4703,7 @@ class App(ctk.CTk):
             header_pos, footer_pos = self._get_overlay_positions()
             success, video_error = ve.process_video_v2(
                 self.video_path.get(), out, "temp_v2.mp3", self.bgm_path.get(),
-                self.header_text.get(), self.footer_text.get(),
+                self._visible_title("header"), self._visible_title("footer"),
                 render_keep_seconds, render_skip_seconds, max_duration,
                 self.header_font_size, self.footer_font_size,
                 self.header_color, self.footer_color,
@@ -4339,6 +4712,21 @@ class App(ctk.CTk):
                 self.footer_bar_color,
                 header_pos,
                 footer_pos,
+                logo_path=getattr(self, "logo_path_var", "") or None,
+                logo_x_ratio=getattr(self, "logo_x_ratio", 0.85),
+                logo_y_ratio=getattr(self, "logo_y_ratio", 0.05),
+                logo_size_pct=getattr(self, "logo_size_pct_var", 10),
+                delogo_boxes=getattr(self, "delogo_boxes", None) if getattr(self, "delogo_enabled", False) else None,
+                burn_srt_path=getattr(self, "burn_srt_path_var", "") if getattr(self, "burn_srt_enabled", False) else None,
+                burn_sub_x_ratio=self.burn_sub_x_ratio,
+                burn_sub_y_ratio=self.burn_sub_y_ratio,
+                burn_sub_fontsize=getattr(self, "burn_sub_fontsize_var", 36),
+                burn_sub_color=getattr(self, "burn_sub_color_var", "white"),
+                burn_sub_outline=self.burn_sub_outline_var,
+                burn_sub_font=self.burn_sub_font_var,
+                burn_sub_background=self.burn_sub_background_var,
+                burn_sub_background_color=self.burn_sub_background_color_var,
+                burn_sub_background_opacity=self.burn_sub_background_opacity_var,
             )
             
             if success:
@@ -5816,7 +6204,7 @@ Tạo JSON ngay."""
                 header_pos, footer_pos = self._get_overlay_positions()
                 success, video_error = ve.process_video_v2(
                     cut_video_path, out, tts_path, self.bgm_path.get(),
-                    self.header_text.get(), self.footer_text.get(),
+                    self._visible_title("header"), self._visible_title("footer"),
                     1, 0, cut_duration,
                     self.header_font_size, self.footer_font_size,
                     self.header_color, self.footer_color,
@@ -5825,6 +6213,21 @@ Tạo JSON ngay."""
                     self.footer_bar_color,
                     header_pos,
                     footer_pos,
+                    logo_path=getattr(self, "logo_path_var", "") or None,
+                    logo_x_ratio=self.logo_x_ratio,
+                    logo_y_ratio=self.logo_y_ratio,
+                    logo_size_pct=getattr(self, "logo_size_pct_var", 10),
+                    delogo_boxes=self.delogo_boxes if self.delogo_enabled else None,
+                    burn_srt_path=getattr(self, "burn_srt_path_var", "") if getattr(self, "burn_srt_enabled", False) else None,
+                    burn_sub_x_ratio=self.burn_sub_x_ratio,
+                    burn_sub_y_ratio=self.burn_sub_y_ratio,
+                    burn_sub_fontsize=getattr(self, "burn_sub_fontsize_var", 36),
+                    burn_sub_color=getattr(self, "burn_sub_color_var", "white"),
+                    burn_sub_outline=self.burn_sub_outline_var,
+                burn_sub_font=self.burn_sub_font_var,
+                burn_sub_background=self.burn_sub_background_var,
+                burn_sub_background_color=self.burn_sub_background_color_var,
+                burn_sub_background_opacity=self.burn_sub_background_opacity_var,
                 )
                 
                 if success:
@@ -5889,17 +6292,16 @@ Tạo JSON ngay."""
         self._review_style_pairs = self._review_style_choice_pairs()
         self._review_style_label_to_key = {label: key for label, key in self._review_style_pairs}
         self._review_style_key_to_label = {key: label for label, key in self._review_style_pairs}
-        frame = ctk.CTkFrame(self.container, fg_color="transparent")
-        frame.pack(fill="x", pady=2)
-        ctk.CTkLabel(frame, text="Kiểu AI review:", width=120, anchor="w").pack(side="left")
-        self.review_style = ctk.CTkComboBox(
-            frame,
-            values=[label for label, _key in self._review_style_pairs],
-            state="readonly",
-            width=250,
-            command=self._on_review_style_change,
+        row = self._make_row()
+        self._add_label_to_row(row, "Kiểu AI review:")
+        self.review_style = QComboBox_CTK(row)
+        for label, _key in self._review_style_pairs:
+            self.review_style.addItem(label)
+        self.review_style.currentTextChanged.connect(
+            lambda v: self._on_review_style_change(v)
         )
-        self.review_style.pack(side="left", padx=5)
+        row.layout().addWidget(self.review_style)
+        self.container._add(row)
         self._set_review_style(os.environ.get("AUTORECAP_REVIEW_STYLE") or "professional_youtube_movie_recap", save=False)
 
     def _selected_review_style_key(self) -> str:
@@ -5938,6 +6340,7 @@ Tạo JSON ngay."""
 
     def _on_capcut_srt_mode_change(self, value=None, save=True):
         mode = "manual" if value == self.CAPCUT_SRT_MANUAL else "auto"
+        self.capcut_srt_mode.set(self.CAPCUT_SRT_MANUAL if mode == 'manual' else self.CAPCUT_SRT_AUTO)
         if hasattr(self, "btn_capcut_srt"):
             self.btn_capcut_srt.configure(text=self._capcut_button_text(mode))
         if hasattr(self, "capcut_srt_mode_hint"):
@@ -6220,6 +6623,12 @@ Tạo JSON ngay."""
 
         def on_step(name: str, status: str):
             """Update step label in UI thread."""
+            if status == 'running':
+                self.after(0,lambda n=name:self._set_pipeline_progress(None,f'{n}: đang xử lý'))
+            elif status in ('done','skipped'):
+                self.after(0,lambda n=name,s=status:self._set_pipeline_progress(100,f'{n}: '+('hoàn tất' if s=='done' else 'đã bỏ qua / dùng kết quả có sẵn')))
+            elif status == 'failed':
+                self.after(0,lambda n=name:self._set_pipeline_progress(0,f'{n}: lỗi — xem chi tiết trong log'))
             icon = STATUS_ICONS.get(status, "⏳")
             color = STATUS_COLORS.get(status, "gray")
             if name in self._fp_step_labels:
@@ -6237,7 +6646,7 @@ Tạo JSON ngay."""
             voice_id          = self._voice_id(self.voice_choice.get()) if hasattr(self, "voice_choice") else "vi-VN-HoaiMyNeural"
             keep_s, skip_s, _ = self._get_cut_settings()
             preview_label, max_min, max_seconds = self._get_preview_duration_settings()
-            capcut_srt_mode = self._selected_capcut_srt_mode()
+            capcut_srt_mode = 'auto'  # Full Pipeline never waits for CapCut Desktop.
             os.environ["AUTORECAP_CAPCUT_SRT_MODE"] = capcut_srt_mode
             os.environ["AUTORECAP_TARGET_REVIEW_LABEL"] = preview_label
             if max_min:
@@ -6256,6 +6665,8 @@ Tạo JSON ngay."""
                 source_srt = self._ensure_vietnamese_source_srt(source_srt) or source_srt
             smart = getattr(self, "_fp_smart_cut", True)
             log(f"   🎭 Kiểu AI review: {self._review_style_key_to_label.get(review_style, review_style)}")
+            if not self._manual_script_review.isChecked():
+                log("   🚀 Tự động từ đầu đến xuất video: không chờ duyệt kịch bản; dùng kiểm tra và sửa lỗi sẵn có của pipeline.")
             log(f"   ⏱️ Ngân sách review: {preview_label} -> AI chia ngân sách chapter; video đi theo voice thật")
             log(
                 "   🎬 Chế độ SRT CapCut: "
@@ -6263,6 +6674,7 @@ Tạo JSON ngay."""
             )
 
             pipeline = FullPipeline(
+                preview_design=self._preview_design_settings(),
                 video_path=video_path,
                 output_dir=output_dir,
                 movie_title=movie_title,
@@ -6275,8 +6687,8 @@ Tạo JSON ngay."""
                 gemini_api_key=api_key,
                 source_srt_path=source_srt,
                 bg_music_path=getattr(self, "bgm_path", None) and self.bgm_path.get().strip() or "",
-                header_text=self.header_text.get().strip() if hasattr(self, "header_text") else "",
-                footer_text=self.footer_text.get().strip() if hasattr(self, "footer_text") else "",
+                header_text=self._visible_title("header"),
+                footer_text=self._visible_title("footer"),
                 header_color=getattr(self, "header_color", (255, 255, 0)),
                 footer_color=getattr(self, "footer_color", (255, 255, 255)),
                 header_bar_color=getattr(self, "header_bar_color", (255, 0, 0)),
@@ -6295,6 +6707,7 @@ Tạo JSON ngay."""
             # Đây là SRT chứa timestamp gốc để AI map thoại đúng cảnh
             if (
                 (not source_srt or not os.path.exists(source_srt))
+                and capcut_srt_mode == 'manual'
                 and os.getenv("AUTORECAP_CAPCUT_DESKTOP_PREFLIGHT", "0").strip() == "1"
             ):
                 log("   📌 Chưa có SRT gốc — gọi CapCut để tạo SRT từ video GỐC...\n")
@@ -6464,7 +6877,31 @@ Tạo JSON ngay."""
 
 
 def run_app():
+    qapp = QApplication.instance() or QApplication(sys.argv)
+
+    # ── Tải assets lần đầu (models + tools) ──────────────────────────────────
+    try:
+        from asset_downloader import ensure_assets
+        if not ensure_assets():
+            sys.exit(0)
+    except Exception as _dl_err:
+        QMessageBox.critical(None, "Lỗi", f"Không thể kiểm tra tài nguyên:\n{_dl_err}")
+        sys.exit(1)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── Xác thực tài khoản BOOM Review ───────────────────────────────────────
+    try:
+        from boom_auth import check_auth
+        ok, username, token = check_auth()
+        if not ok:
+            sys.exit(0)
+    except Exception as _auth_err:
+        QMessageBox.critical(None, "Lỗi xác thực", f"Không thể tải module xác thực:\n{_auth_err}")
+        sys.exit(1)
+    # ─────────────────────────────────────────────────────────────────────────
+
     app = App()
+    app.show()
 
     # ── License check đã tắt → mở app thẳng ─────────────────────────────────
     def _check_license_after_start():
@@ -6479,22 +6916,19 @@ def run_app():
 
             def on_update_result(result):
                 if result:
-                    # Chạy trên main thread qua after()
                     app.after(0, lambda: show_update_dialog(app, result))
 
-            # Delay 5 giây sau khi app mở để không lag lúc khởi động
             def _delayed_check():
                 check_update_async(on_update_result)
 
             app.after(5000, _delayed_check)
         except Exception:
-            pass  # Update check không quan trọng, bỏ qua nếu lỗi
+            pass
 
     app.after(100, _check_license_after_start)
     # ─────────────────────────────────────────────────────────────────────────
-    app.mainloop()
+    sys.exit(qapp.exec())
 
 
 if __name__ == "__main__":
     run_app()
-

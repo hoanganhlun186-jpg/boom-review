@@ -1,4 +1,4 @@
-name: Build and Release AnhStudio Client
+name: Build and Release BoomReview
 
 on:
   push:
@@ -21,17 +21,58 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install PyQt6 requests nuitka ordered-set zstandard
+        pip install PySide6 requests nuitka ordered-set zstandard pillow curl_cffi edge_tts certifi
 
     - name: Build EXE with Nuitka
       run: |
-        python -m nuitka --onefile --windows-disable-console --enable-plugin=pyqt6 --output-filename=AnhStudio.exe --assume-yes-for-downloads honggou_tab.py
+        python -m nuitka `
+          --standalone `
+          --windows-console-mode=disable `
+          --windows-product-name="BOOM Review" `
+          --windows-icon-from-ico=assets\boom_icon.ico `
+          --output-dir=dist `
+          --output-filename=BoomReview.exe `
+          --include-package=engine `
+          --include-package=core `
+          --include-package=ui `
+          --include-package=utils `
+          --include-package=capcut_tts_api `
+          --include-package=requests `
+          --include-module=asset_downloader `
+          --include-module=boom_auth `
+          --include-package-data=edge_tts `
+          --include-package-data=certifi `
+          --enable-plugin=pyside6 `
+          --assume-yes-for-downloads `
+          main.py
+
+    - name: Copy assets and version
+      run: |
+        python -c "
+        import shutil, certifi
+        from pathlib import Path
+        dist = Path('dist/main.dist')
+        shutil.copytree('assets', dist / 'assets', dirs_exist_ok=True)
+        shutil.copy2(certifi.where(), dist / 'cacert.pem')
+        shutil.copy2('version.txt', dist / 'version.txt')
+        print('Assets copied OK')
+        "
+
+    - name: Install Inno Setup
+      run: choco install innosetup --yes
+
+    - name: Build Installer
+      env:
+        APP_VERSION: ${{ github.ref_name }}
+      run: |
+        $version = $env:APP_VERSION.TrimStart('v')
+        $env:APP_VERSION = $version
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 
     - name: Create GitHub Release
-      id: create_release
       uses: softprops/action-gh-release@v1
       with:
-        files: AnhStudio.exe
+        files: installer_output/BoomReview-Setup-*.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -40,12 +81,13 @@ jobs:
         ADMIN_PASS: ${{ secrets.ADMIN_PASSWORD }}
         VERSION: ${{ github.ref_name }}
       run: |
+        $version = $env:VERSION.TrimStart('v')
         $Url = "http://163.61.182.119:8000/api/admin/publish_update"
-        $DownloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/AnhStudio.exe"
+        $DownloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/BoomReview-Setup-v${version}-win64.exe"
         $Body = @{
-            latest_version = $env:VERSION.TrimStart('v')
+            latest_version = $version
             download_url = $DownloadUrl
-            changelog = "Bản cập nhật tối ưu hệ thống: $env:VERSION"
+            changelog = "Ban cap nhat BoomReview: v${version}"
             force_update = $true
         } | ConvertTo-Json
         Invoke-RestMethod -Uri $Url -Method Post -Body $Body -ContentType "application/json" -Headers @{ "Authorization" = "Bearer $env:ADMIN_PASS" }
