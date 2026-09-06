@@ -3,7 +3,7 @@
 asset_downloader.py — Tự động tải models & tools từ GitHub Releases
 Chạy lần đầu nếu thiếu file, có progress bar PySide6.
 """
-import os, sys, zipfile, shutil, threading, requests
+import os, sys, zipfile, shutil, threading, time, requests
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QApplication
@@ -37,6 +37,9 @@ SENTINEL_FILES = [
     os.path.join("data",   "tools"),       # thư mục data/tools/
 ]
 
+MAX_RETRIES = 3           # số lần thử lại khi lỗi mạng
+CHUNK_SIZE  = 1024 * 512  # 512 KB mỗi chunk
+
 # ============================================================
 # Helper: thư mục gốc của app (cạnh file exe hoặc main.py)
 # ============================================================
@@ -55,13 +58,58 @@ def needs_download() -> bool:
 
 
 # ============================================================
-# Thread tải + giải nén
+# Thread tải + giải nén (có retry tự động)
 # ============================================================
 class DownloadThread(QThread):
     progress     = Signal(int, int, str)   # (current_bytes, total_bytes, label)
     asset_done   = Signal(str)             # tên asset vừa xong
     all_done     = Signal()
     error        = Signal(str)
+
+    def _download_file(self, url: str, zip_path: str, label: str) -> bool:
+        """Tải file với retry. Trả về True nếu thành công."""
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                if attempt > 1:
+                    self.progress.emit(0, 1, f"Thử lại lần {attempt}/{MAX_RETRIES}: {label}...")
+                    time.sleep(3)
+
+                # timeout=(connect, read) — read 600s để không bị ngắt khi tải file lớn
+                resp = requests.get(
+                    url, stream=True,
+                    timeout=(15, 600),
+                    headers={"Accept-Encoding": "identity"}
+                )
+                resp.raise_for_status()
+
+                total = int(resp.headers.get("content-length", 0))
+                downloaded = 0
+
+                with open(zip_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=CHUNK_SIZE):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            self.progress.emit(
+                                downloaded, total or downloaded,
+                                f"Đang tải: {label} "
+                                f"({downloaded // 1024 // 1024} MB"
+                                + (f" / {total // 1024 // 1024} MB" if total else "") + ")"
+                            )
+                return True  # thành công
+
+            except Exception as e:
+                # xóa file tải dở
+                try:
+                    if os.path.exists(zip_path):
+                        os.remove(zip_path)
+                except Exception:
+                    pass
+                if attempt == MAX_RETRIES:
+                    self.error.emit(f"Không tải được {label} sau {MAX_RETRIES} lần thử:\n{e}")
+                    return False
+
+        return False
 
     def run(self):
         app_dir = get_app_dir()
@@ -72,35 +120,27 @@ class DownloadThread(QThread):
 
                 # --- Download ---
                 self.progress.emit(0, 1, f"Đang tải: {asset['name']}...")
-                try:
-                    resp = requests.get(asset["url"], stream=True, timeout=30)
-                    resp.raise_for_status()
-                except Exception as e:
-                    self.error.emit(f"Không tải được {asset['name']}:\n{e}")
+                if not self._download_file(asset["url"], zip_path, asset["name"]):
                     return
-
-                total = int(resp.headers.get("content-length", 0))
-                downloaded = 0
-                with open(zip_path, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=1024 * 256):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            self.progress.emit(downloaded, total or downloaded,
-                                               f"Đang tải: {asset['name']} "
-                                               f"({downloaded // 1024 // 1024} MB / "
-                                               f"{total // 1024 // 1024} MB)")
 
                 # --- Giải nén ---
                 self.progress.emit(0, 1, f"Đang giải nén: {asset['name']}...")
                 os.makedirs(dest_dir, exist_ok=True)
-                with zipfile.ZipFile(zip_path, "r") as zf:
-                    members = zf.infolist()
-                    for i, member in enumerate(members):
-                        zf.extract(member, app_dir)
-                        self.progress.emit(i + 1, len(members),
-                                           f"Giải nén: {asset['name']} "
-                                           f"({i + 1}/{len(members)} file)")
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as zf:
+                        members = zf.infolist()
+                        for i, member in enumerate(members):
+                            zf.extract(member, app_dir)
+                            self.progress.emit(i + 1, len(members),
+                                               f"Giải nén: {asset['name']} "
+                                               f"({i + 1}/{len(members)} file)")
+                except zipfile.BadZipFile:
+                    self.error.emit(f"File zip bị lỗi: {asset['zip_name']}\nVui lòng thử lại.")
+                    try:
+                        os.remove(zip_path)
+                    except Exception:
+                        pass
+                    return
 
                 # --- Xóa zip sau khi xong ---
                 try:
