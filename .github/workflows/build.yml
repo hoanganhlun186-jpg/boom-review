@@ -24,11 +24,16 @@ jobs:
         pip install PySide6 requests nuitka ordered-set zstandard pillow curl_cffi edge_tts certifi
 
     - name: Build EXE with Nuitka
+      env:
+        APP_VERSION: ${{ github.ref_name }}
       run: |
+        $version = $env:APP_VERSION.TrimStart('v')
         python -m nuitka `
           --standalone `
           --windows-console-mode=disable `
           --windows-product-name="BOOM Review" `
+          --windows-product-version="$version.0" `
+          --windows-file-version="$version.0" `
           --windows-icon-from-ico=assets\boom_icon.ico `
           --output-dir=dist `
           --output-filename=BoomReview.exe `
