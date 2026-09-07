@@ -63,6 +63,9 @@ jobs:
         $version = $env:APP_VERSION.TrimStart('v')
         python -m nuitka `
           --standalone `
+          --nofollow-import-to=google.genai `
+          --nofollow-import-to=google.generativeai `
+          --nofollow-import-to=google.ai `
           --windows-console-mode=disable `
           --windows-product-name="BOOM Review" `
           --windows-product-version="$version.0" `
@@ -93,6 +96,7 @@ jobs:
           --enable-plugin=numpy `
           --enable-plugin=tk-inter `
           --assume-yes-for-downloads `
+          --jobs=1 `
           main.py
 
     - name: Copy assets and ffmpeg
