@@ -536,7 +536,7 @@ class VisualSceneEvidence:
                         f"{len(batch)} frame"
                     )
                 configured_batch_timeout = float(
-                    os.environ.get("AUTORECAP_VISION_BATCH_TIMEOUT", "60") or "60"
+                    os.environ.get("AUTORECAP_VISION_BATCH_TIMEOUT", "180") or "180"
                 )
                 remaining_total = (
                     max(5.0, max_seconds - elapsed) if max_seconds else configured_batch_timeout

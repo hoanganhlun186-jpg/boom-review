@@ -248,7 +248,7 @@ def _ensure_review_clip(block: dict, output_dir: Path | None = None) -> dict:
 class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
     """Stable Script Editor used by FullPipeline after AI_FULL."""
 
-    def __init__(self, parent, pipeline, on_confirm=None, on_cancel=None):
+    def __init__(self, parent, pipeline, on_confirm=None, on_cancel=None, auto_fix=False):
         if ctk is None:
             raise RuntimeError("customtkinter is required for ScriptEditorWindow")
         from ui.tk_qt_bridge import editor_master
@@ -260,6 +260,7 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
         self.on_cancel = on_cancel
         self._confirmed = False
         self._ai_fix_running = False
+        self._auto_fix = bool(auto_fix)  # Tự động AI sửa + xác nhận khi không có lỗi
         self._block_entries = []
         self._preview_images = []
         self._issue_ids = set()
@@ -299,6 +300,9 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
             self.focus_force()
         except Exception:
             pass
+        # N\u1ebfu auto_fix=True: sau 800ms ki\u1ec3m tra block l\u1ed7i \u2192 t\u1ef1 g\u1ecdi AI s\u1eeda review
+        if self._auto_fix:
+            self._safe_after(800, self._auto_fix_then_confirm)
 
     def _set_initial_window_size(self):
         """Open large by default while retaining native resize controls."""
@@ -1151,6 +1155,21 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
                 payload.append((idx, box, block, dur))
         return payload
 
+    def _auto_fix_then_confirm(self):
+        """Được gọi tự động khi auto_fix=True: sửa block lỗi rồi xác nhận."""
+        targets = self._blocks_needing_ai()
+        if targets:
+            self._safe_status(
+                f"Auto: phát hiện {len(targets)} block cần sửa, đang gọi AI sửa review...", "#60a5fa"
+            )
+            self._ai_fix_running = True
+            self._safe_confirm_button("disabled", "ĐANG AI SỬA TỰ ĐỘNG...")
+            threading.Thread(target=self._ai_fix_worker, args=(targets,), daemon=True).start()
+        else:
+            # Không có block lỗi → xác nhận ngay
+            self._safe_status("Auto: không có block lỗi, tự động xác nhận tạo voice...", "#22c55e")
+            self._safe_after(500, self._on_confirm)
+
     def _ai_fix_timing(self):
         if self._ai_fix_running:
             return
@@ -1330,6 +1349,16 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
                     self._safe_status(f"AI lỗi, đã dùng sửa nội bộ: {fixed} block, chống trùng {deduped} block ({error[:70]})", "#f59e0b")
                 else:
                     self._safe_status(f"AI sửa review đã sửa {fixed}/{len(targets)} block, chống trùng {deduped} block, đã đóng Gemini Web", "#22c55e" if fixed else "#f59e0b")
+                # auto_fix mode: sau khi sửa xong, nếu không còn block lỗi → tự xác nhận
+                if self._auto_fix:
+                    remaining = self._blocks_needing_ai()
+                    if remaining:
+                        self._safe_status(
+                            f"Auto: vẫn còn {len(remaining)} block cần xem lại — dừng để user kiểm tra thủ công.", "#f59e0b"
+                        )
+                    else:
+                        self._safe_status("Auto: tất cả block đã OK, tự động xác nhận tạo voice...", "#22c55e")
+                        self._safe_after(800, self._on_confirm)
             self._safe_after(0, finish)
 
     def _set_stop_voice_enabled(self, enabled: bool):

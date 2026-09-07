@@ -30,10 +30,29 @@ def update_version_file(new_version):
         f.write(new_version)
 
 
+def update_main_py_version(new_version):
+    """Cập nhật APP_VERSION trong main.py."""
+    try:
+        with open(MAIN_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+        updated = re.sub(
+            r'^(APP_VERSION\s*=\s*)["\'][\d.]+["\']',
+            f'\\g<1>"{new_version}"',
+            content,
+            flags=re.MULTILINE,
+        )
+        if updated != content:
+            with open(MAIN_FILE, "w", encoding="utf-8") as f:
+                f.write(updated)
+    except Exception as e:
+        raise RuntimeError(f"Không cập nhật được APP_VERSION trong {MAIN_FILE}:\n{e}")
+
+
 def restore_version_file(old_version):
     try:
         with open(VERSION_FILE, "w", encoding="utf-8") as f:
             f.write(old_version)
+        update_main_py_version(old_version)
     except Exception:
         pass
 
@@ -58,6 +77,7 @@ def publish():
 
     try:
         update_version_file(new_ver)
+        update_main_py_version(new_ver)
 
         ok, out = _run(["git", "add", "."])
         if not ok:

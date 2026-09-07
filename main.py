@@ -1,6 +1,7 @@
+from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-from __future__ import annotations
+APP_VERSION = "1.0.10"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 import re, shutil, io, math, unicodedata, tempfile
 
@@ -561,7 +562,7 @@ class App(PreviewEditorMixin, QMainWindow):
         except Exception:
             app_version = "2.0.0"
 
-        self.setWindowTitle(f"BOOM Review v1.0.0 - AI Tự Động Review Phim")
+        self.setWindowTitle(f"BOOM Review v{APP_VERSION} - AI Tự Động Review Phim")
         self.resize(1400, 950)
         self.setStyleSheet(DARK_QSS)
         self._apply_app_icon()
@@ -703,7 +704,7 @@ class App(PreviewEditorMixin, QMainWindow):
         hl1 = QHBoxLayout()
         lbl_title = QLabel("BOOM Review")
         lbl_title.setStyleSheet("color:#e2e8f0;font-size:14px;font-weight:bold;")
-        lbl_sub   = QLabel("v1.0.0 — AI Tự Động Review Phim")
+        lbl_sub   = QLabel(f"v{APP_VERSION} — AI Tự Động Review Phim")
         lbl_sub.setStyleSheet("color:#475569;font-size:10px;")
         hdr_lay.addWidget(lbl_title)
         hdr_lay.addWidget(lbl_sub)
@@ -3729,11 +3730,32 @@ class App(PreviewEditorMixin, QMainWindow):
         if SRTTranslator.is_translated_srt_path(source_srt_path) and not force:
             try:
                 translated_subtitles = SRTParser.parse_srt(source_srt_path)
-                if self._srt_text_has_enough_vietnamese_marks(translated_subtitles):
-                    source_srt_path = self._mirror_translated_srt_to_output_dir(source_srt_path)
-                    self._set_source_srt_path_threadsafe(source_srt_path, auto_detected=True)
-                    return source_srt_path
-                self._thread_safe_log("⚠️ File _translated.srt hiện chưa phải tiếng Việt đủ dấu; sẽ dịch lại bằng Gemini Web.\n")
+                # File đã có suffix _vi.srt / _translated.srt: chỉ cần không có CJK là chấp nhận.
+                # Không yêu cầu tỷ lệ dấu vì nhiều SRT tiếng Việt hợp lệ có tỷ lệ dấu thấp
+                # (nhạc phim, tên riêng Latin, dòng kỹ thuật...).
+                combined_check = " ".join(str(x.get("text") or "") for x in translated_subtitles)
+                has_cjk = bool(re.search(r"[㐀-䶿一-鿿぀-ヿ가-힯]", combined_check))
+                if has_cjk:
+                    # Chỉ strip ký tự CJK lẻ tẻ lọt vào, không re-translate cả file
+                    cjk_count = len(re.findall(r"[㐀-䶿一-鿿぀-ヿ가-힯]", combined_check))
+                    for item in translated_subtitles:
+                        item["text"] = re.sub(r"[㐀-䶿一-鿿぀-ヿ가-힯]", "", str(item.get("text") or "")).strip()
+                    # Ghi lại file đã clean
+                    try:
+                        lines = []
+                        for item in translated_subtitles:
+                            lines.append(str(item.get("index", "")))
+                            lines.append(f"{item.get('start')} --> {item.get('end')}")
+                            lines.append(item.get("text", ""))
+                            lines.append("")
+                        with open(source_srt_path, "w", encoding="utf-8") as _f:
+                            _f.write("\n".join(lines).strip() + "\n")
+                        self._thread_safe_log(f"🧹 Đã xóa {cjk_count} ký tự CJK lẻ trong _vi.srt (không dịch lại).\n")
+                    except Exception:
+                        pass
+                source_srt_path = self._mirror_translated_srt_to_output_dir(source_srt_path)
+                self._set_source_srt_path_threadsafe(source_srt_path, auto_detected=True)
+                return source_srt_path
             except Exception:
                 self._thread_safe_log("⚠️ Không đọc được file _translated.srt; sẽ dịch lại bằng Gemini Web.\n")
 
@@ -3741,16 +3763,19 @@ class App(PreviewEditorMixin, QMainWindow):
         if output_path and self._is_valid_srt_path(output_path):
             try:
                 cached_subtitles = SRTParser.parse_srt(output_path)
+                cached_combined = " ".join(str(x.get("text") or "") for x in cached_subtitles)
+                cached_has_cjk = bool(re.search(r"[㐀-䶿一-鿿぀-ヿ가-힯]", cached_combined))
                 if (
                     os.path.getmtime(output_path) >= os.path.getmtime(source_srt_path)
-                    and self._srt_text_has_enough_vietnamese_marks(cached_subtitles)
+                    and not cached_has_cjk
+                    and cached_subtitles
                 ):
                     self._thread_safe_log(f"🇻🇳 Dùng lại SRT đã dịch tiếng Việt: {output_path}\n")
                     output_path = self._mirror_translated_srt_to_output_dir(output_path)
                     self._set_source_srt_path_threadsafe(output_path, auto_detected=True)
                     return output_path
-                if cached_subtitles and not self._srt_text_has_enough_vietnamese_marks(cached_subtitles):
-                    self._thread_safe_log("⚠️ SRT dịch cache thiếu dấu tiếng Việt; bỏ cache và dịch lại.\n")
+                if cached_subtitles and cached_has_cjk:
+                    self._thread_safe_log("⚠️ SRT dịch cache vẫn chứa CJK; bỏ cache và dịch lại.\n")
             except Exception:
                 pass
 

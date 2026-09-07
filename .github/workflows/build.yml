@@ -16,12 +16,45 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
+        python-version: '3.12'
 
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install PySide6 requests nuitka ordered-set zstandard pillow curl_cffi edge_tts certifi
+        pip install `
+          PySide6 `
+          requests `
+          nuitka `
+          ordered-set `
+          zstandard `
+          pillow `
+          curl_cffi `
+          edge_tts `
+          certifi `
+          google-generativeai `
+          google-genai `
+          opencv-python `
+          numpy `
+          pydub `
+          scipy `
+          librosa `
+          ffmpeg-python `
+          pyperclip `
+          "pyautogui==0.9.54" `
+          selenium `
+          playwright
+
+    - name: Download ffmpeg binaries
+      run: |
+        # Mirror ổn định hơn gyan.dev
+        $ffmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+        Invoke-WebRequest -Uri $ffmpegUrl -OutFile ffmpeg.zip
+        Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extracted -Force
+        $ffmpegDir = Get-ChildItem ffmpeg_extracted -Directory | Select-Object -First 1
+        Copy-Item "$($ffmpegDir.FullName)\bin\ffmpeg.exe" -Destination ffmpeg.exe
+        Copy-Item "$($ffmpegDir.FullName)\bin\ffprobe.exe" -Destination ffprobe.exe
+        Copy-Item "$($ffmpegDir.FullName)\bin\ffplay.exe" -Destination ffplay.exe
+        Write-Host "ffmpeg downloaded OK"
 
     - name: Build EXE with Nuitka
       env:
@@ -43,24 +76,53 @@ jobs:
           --include-package=utils `
           --include-package=capcut_tts_api `
           --include-package=requests `
+          --include-package=selenium `
+          --include-package=PIL `
+          --include-package=cv2 `
           --include-module=asset_downloader `
           --include-module=boom_auth `
+          --include-module=winreg `
           --include-package-data=edge_tts `
           --include-package-data=certifi `
+          --include-package-data=google `
+          --include-package-data=librosa `
+          --include-package-data=curl_cffi `
+          --include-package-data=PIL `
+          --include-package-data=scipy `
           --enable-plugin=pyside6 `
+          --enable-plugin=numpy `
+          --enable-plugin=tk-inter `
           --assume-yes-for-downloads `
           main.py
 
-    - name: Copy assets and version
+    - name: Copy assets and ffmpeg
       run: |
         python -c "
         import shutil, certifi
         from pathlib import Path
-        dist = Path('dist/main.dist')
+
+        dist = Path('dist/BoomReview.dist')
+
+        # assets (icon, font, ...)
         shutil.copytree('assets', dist / 'assets', dirs_exist_ok=True)
+
+        # certifi CA bundle
         shutil.copy2(certifi.where(), dist / 'cacert.pem')
+
+        # version
         shutil.copy2('version.txt', dist / 'version.txt')
-        print('Assets copied OK')
+
+        # ffmpeg binaries
+        for fname in ['ffmpeg.exe', 'ffprobe.exe', 'ffplay.exe']:
+            src = Path(fname)
+            if src.exists():
+                shutil.copy2(src, dist / fname)
+                print(f'Copied {fname}')
+            else:
+                print(f'ERROR: {fname} not found!')
+                raise FileNotFoundError(fname)
+
+        print('Done copying assets')
         "
 
     - name: Install Inno Setup
@@ -96,7 +158,3 @@ jobs:
             force_update = $true
         } | ConvertTo-Json
         Invoke-RestMethod -Uri $Url -Method Post -Body $Body -ContentType "application/json" -Headers @{ "Authorization" = "Bearer $env:ADMIN_PASS" }
-
-# v4
-
-# v4

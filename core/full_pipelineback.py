@@ -5015,32 +5015,8 @@ class FullPipeline:
                         os.path.exists(pkg_file_for_cache)
                         and os.path.getmtime(pkg_file_for_cache) > os.path.getmtime(seg_meta_path)
                     )
-                    # Nếu đang trong repair pass, chỉ invalidate các block bị sửa
-                    _repair_ids: set = getattr(self, '_voice_repair_invalidate_ids', set())
-                    if cache_is_stale and not _repair_ids:
+                    if cache_is_stale:
                         self._log("   voice_segments cache cu hon Script Editor -> tao voice lai")
-                    elif cache_is_stale and _repair_ids:
-                        # Partial invalidate: chỉ xóa cache các block bị repair
-                        for s in json.load(open(seg_meta_path, encoding="utf-8")):
-                            bid = s.get("block_id")
-                            ap  = s.get("audio_path", "")
-                            if bid is None or int(bid) in _repair_ids:
-                                continue  # block bị repair -> bỏ qua cache
-                            if (
-                                current_editor_sync_version
-                                and s.get("script_editor_synced")
-                                and s.get("script_editor_sync_version") != current_editor_sync_version
-                            ):
-                                continue
-                            if (
-                                current_editor_sync_id
-                                and s.get("script_editor_synced")
-                                and s.get("script_editor_sync_id") != current_editor_sync_id
-                            ):
-                                continue
-                            if ap and os.path.exists(ap) and os.path.getsize(ap) > 0:
-                                cached[int(bid)] = s
-                        self._log(f"   repair mode: giữ cache {len(cached)} block, tạo lại {len(_repair_ids)} block bị sửa")
                     else:
                         for s in json.load(open(seg_meta_path, encoding="utf-8")):
                             bid = s.get("block_id")
@@ -6452,8 +6428,6 @@ class FullPipeline:
                     bid = int(block.get('block_id') or index)
                     if bid in bad_ids: texts[bid] = block.get('text','')
                 self._automatic_voice_repair_texts = texts
-                # Chỉ invalidate cache của các block bị sửa, giữ lại các block OK
-                self._voice_repair_invalidate_ids = bad_ids
                 with open(os.path.join(self.output_dir,'ai_package.json'),'w',encoding='utf-8') as file:
                     json.dump(self.ai_package,file,ensure_ascii=False,indent=2)
                 try:
@@ -6461,7 +6435,6 @@ class FullPipeline:
                         return False
                 finally:
                     self._automatic_voice_repair_texts = {}
-                    self._voice_repair_invalidate_ids = set()
             return False
         except Exception as error:
             self._step_fail('VOICE_SEGMENTS',f'Không tự sửa được lời voice: {error}')

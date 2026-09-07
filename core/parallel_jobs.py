@@ -2,10 +2,11 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 
-def worker_count(name, default):
+def worker_count(name, default, max_workers=16):
+    """Đọc số luồng từ env var, giới hạn [1, max_workers]."""
     try:
-        return max(1,min(4,int(os.getenv(name,str(default)))))
-    except (TypeError,ValueError):
+        return max(1, min(max_workers, int(os.getenv(name, str(default)))))
+    except (TypeError, ValueError):
         return default
 
 def ordered_parallel(function, jobs, workers=2, progress=None):

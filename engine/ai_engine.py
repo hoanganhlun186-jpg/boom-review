@@ -617,7 +617,7 @@ class AIEngine:
             "model": model_name,
             "messages": [{"role": "user", "content": converted}],
             "temperature": float(os.environ.get("OPENROUTER_VISION_TEMPERATURE", "0.2") or "0.2"),
-            "max_tokens": int(os.environ.get("OPENROUTER_VISION_MAX_TOKENS", "4096") or "4096"),
+            "max_tokens": int(os.environ.get("OPENROUTER_VISION_MAX_TOKENS", "1500") or "1500"),
         }
         body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(cls.OPENROUTER_URL, data=body, method="POST")

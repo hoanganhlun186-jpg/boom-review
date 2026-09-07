@@ -59,7 +59,7 @@ RECAP_PROMPT_PACK = {
 
 
 NARRATIVE_ROLE_RULES = """NARRATIVE ROLE MAP FOR A COMPLETE RECAP:
-- hook_intro: only the first block/segment of the whole video. Open with the earliest real conflict, introduce the main character/situation, and create curiosity. Do not say "today we review".
+- hook_intro: only the first block/segment of the whole video. Open with the MOST DRAMATIC or TENSE moment available in the evidence — a confrontation, a revelation, a danger — not the earliest chronological event. Drop the viewer into the middle of the conflict first, then provide context. Never open with "today we review", "let's begin", or a generic character introduction. The first sentence must create immediate curiosity or tension.
 - setup_context: early blocks. Explain who is involved, where the pressure comes from, and why the event matters.
 - rising_action: middle blocks. Move the investigation/conflict forward with cause -> reaction -> consequence.
 - escalation_twist: later-middle blocks. Emphasize discoveries, reversals, danger, suspicion, or emotional stakes.
@@ -133,5 +133,6 @@ def recap_block_prompt_rules() -> str:
 - Avoid repeated generic phrases and repeated sentence structures across blocks.
 - If evidence shows ad/logo/betting/trailer/credits/spam, do not create fake story narration for it.
 - When keyframe_refs or visual notes exist, use them as hard visual grounding.
+- NEVER copy system-announcement subtitles verbatim into narration. Subtitles like "[creature/character name] chien dau he cap [rank] sao", "[skill] kich hoat", "[title] [name]" are game/system UI text — convert them into natural narration instead (e.g. "mot con di thu cap C xuat hien" not the raw subtitle text). If the same announcement pattern appeared in a previous block, do not repeat the same sentence structure.
 """.strip()
 

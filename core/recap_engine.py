@@ -167,7 +167,7 @@ def _chapter_act_meta(index: int, total: int) -> Dict[str, str]:
         return {
             "chapter_act": "opening_hook",
             "chapter_act_label": "Mở đầu / hook",
-            "chapter_goal": "Giới thiệu bối cảnh, nhân vật trung tâm, biến cố đầu tiên và lý do người xem phải theo tiếp.",
+            "chapter_goal": "BẮT ĐẦU BẰNG KHOẢNH KHẮC ĐỈNH NHẤT trong chương này — cảnh căng thẳng, bí ẩn hoặc cú lật mạnh nhất có trong bằng chứng — rồi mới kéo về bối cảnh. KHÔNG mở bằng câu giới thiệu nhân vật kiểu 'câu chuyện bắt đầu khi...' hay 'hôm nay chúng ta đến với...'; phải ném người xem thẳng vào giữa xung đột ngay câu đầu tiên.",
         }
     if index == total - 1:
         return {
@@ -274,6 +274,12 @@ LUẬT VĂN PHONG BẮT BUỘC:
 - Tránh câu chung chung như "chi tiết này", "manh mối này", "mạch phim tiếp tục", "ở cảnh này"; hãy gọi tên cụ thể nhân vật, hành động, vật chứng, nguy cơ hoặc bí mật.
 - Câu cuối block nên có lực kéo sang block sau, tạo cảm giác đang xem một bài review liền mạch chứ không phải từng phụ đề rời rạc.
 - Không lặp lại nguyên câu hoặc cùng một ý diễn đạt giữa các block liền kề; mỗi block phải tiến thêm một nhịp mới.
+
+KHÔNG TRÍCH DẪN NGUYÊN VĂN SUBTITLE HỆ THỐNG / THÔNG BÁO:
+- Phim tu tiên/game thường có subtitle dạng thông báo hệ thống như "[Tên dị thú/nhân vật] chiến đấu hệ cấp [X] sao", "[Kỹ năng] kích hoạt", "[Danh hiệu] [tên]", v.v.
+- TUYỆT ĐỐI KHÔNG copy nguyên câu thông báo hệ thống vào narration, dù nó xuất hiện trong SRT hints.
+- Hãy chuyển hóa thông tin đó thành lời thuyết minh tự nhiên. Ví dụ: thay vì viết "Đây là Ngân Nguyệt Ma Lang chiến đấu hệ cấp C sao" thì viết "một con dị thú cấp C xuất hiện" hoặc "hệ thống xác nhận đây là loài thú cấp C nguy hiểm".
+- Nếu cùng loại thông báo đã xuất hiện ở block trước, block hiện tại không được lặp lại cùng cấu trúc câu đó.
 
 LỌC NỘI DUNG KHÔNG PHẢI PHIM (từ RECAP2.0):
 - TUYỆT ĐỐI BỎ QUA và KHÔNG viết narration cho các cảnh chứa: logo/watermark cá độ (1XBET, 789BET, casino), quảng cáo, logo hãng phim (opening studio logo), recap tập trước, trailer mở đầu (montage nhanh với text/nhạc), phụ đề rác/spam.

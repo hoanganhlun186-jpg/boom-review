@@ -41,18 +41,19 @@ def _parse_version(ver: str):
 def check_for_update(timeout: int = 8) -> Optional[dict]:
     """
     Trả về None nếu đang dùng bản mới nhất hoặc lỗi.
-    Trả về dict nếu có bản mới: {latest, current, download_url, release_notes}
+    Trả về dict nếu có bản mới: {latest, current, download_url, release_notes, force_update}
     """
     try:
-        url = f"{SERVER_URL}/api/version/{_APP_ID}"
+        current = get_current_version()
+        url = f"{SERVER_URL}/api/boomreview/check_update?current_version={current}"
         req = urllib.request.Request(url, method="GET")
         req.add_header("Accept", "application/json")
 
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
 
-        latest  = str(data.get("version", "")).strip()
-        current = get_current_version()
+        # Server trả về: latest_version, download_url, changelog, force_update
+        latest = str(data.get("latest_version", "")).strip()
 
         if not latest:
             return None
@@ -62,7 +63,8 @@ def check_for_update(timeout: int = 8) -> Optional[dict]:
                 "latest":        latest,
                 "current":       current,
                 "download_url":  str(data.get("download_url", "") or ""),
-                "release_notes": str(data.get("release_notes", "") or ""),
+                "release_notes": str(data.get("changelog", "") or ""),
+                "force_update":  bool(data.get("force_update", False)),
             }
         return None
 

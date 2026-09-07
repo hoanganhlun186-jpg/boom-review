@@ -719,7 +719,11 @@ def build_clip_concat_list(
             remaining -= actual_clip_dur
 
         if remaining > TRIM_TOLERANCE:
-            return None
+            if not jobs:
+                # Không có clip nào cắt được → thực sự thất bại
+                return None
+            # Có một số clip nhưng không đủ tts_dur → dùng những gì có
+            # (tốt hơn là bỏ block hoàn toàn)
         from core.parallel_jobs import ordered_parallel, worker_count
         workers = worker_count('AUTORECAP_CLIP_WORKERS',2)
         def cut(job):
@@ -1031,7 +1035,11 @@ def assemble_clip_based_video(
         candidate_seconds = sum(max(0.0, end - start) for start, end, _ in candidates)
         if candidate_seconds < tts_dur - TRIM_TOLERANCE:
             source_duration = _probe_duration(source_video, ffprobe_bin)
-            content_end = max(0.0, source_duration - 12.0)
+            is_last_block = (i == len(script_blocks) - 1)
+            # For the last block allow using footage all the way to the end of
+            # the source; earlier blocks keep the -12 s safety margin so that
+            # credits / black frames are avoided in the middle of the recap.
+            content_end = source_duration if is_last_block else max(0.0, source_duration - 12.0)
             missing = tts_dur - candidate_seconds
             fallback_start = max(
                 float(source_timeline_cursor or 0.0),
@@ -1043,6 +1051,25 @@ def assemble_clip_based_video(
                 fallback_start, fallback_end = unused
                 candidates.append((fallback_start, fallback_end, 0.0))
                 log(f"   ℹ️ Block {bid}: bù {fallback_end - fallback_start:.1f}s cảnh chuyển động")
+            elif is_last_block:
+                # For the final block: use whatever footage remains between
+                # fallback_start and source_duration even if it is shorter than
+                # `missing`.  It is better to have the last few seconds of
+                # footage hold on a frame than to fail the whole render.
+                remaining = source_duration - fallback_start
+                if remaining > 0.3:
+                    candidates.append((fallback_start, source_duration, 0.0))
+                    log(
+                        f"   ℹ️ Block {bid} (cuối): dùng {remaining:.1f}s footage còn lại "
+                        f"đến cuối phim (thiếu {missing - remaining:.1f}s so với TTS)"
+                    )
+                else:
+                    log(
+                        f"   ⚠️ Block {bid} (cuối): không còn footage mới "
+                        f"(thiếu {missing:.1f}s); freeze frame cuối sẽ bù phần còn thiếu"
+                    )
+                    # Không return False, không cap tts_dur — mux step sẽ tự freeze
+                    # frame cuối cho đến khi voice kết thúc (tpad=stop_mode=clone)
             else:
                 log(
                     f"   ❌ Block {bid}: thiếu {missing:.1f}s cảnh mới sau "
@@ -1070,17 +1097,32 @@ def assemble_clip_based_video(
 
         # Mux: clip_video + voice_audio → block_N.mp4
         block_out = os.path.join(blocks_dir, f"block_{bid:04d}.mp4")
-        mux_cmd = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
-            "-i", clip_video,
-            "-i", audio_path,
-            "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "copy",
-        ]
-        mux_cmd += [
-            "-c:a", "aac", "-b:a", "192k",
-            "-t", f"{tts_dur:.4f}", block_out,
-        ]
+        clip_video_dur = _probe_duration(clip_video, ffprobe_bin)
+        freeze_needed = tts_dur - clip_video_dur
+        if freeze_needed > 0.1:
+            # Video ngắn hơn voice → freeze frame cuối để khớp audio
+            log(f"   🧊 Block {bid}: freeze frame cuối {freeze_needed:.1f}s để khớp voice")
+            mux_cmd = [
+                ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", clip_video,
+                "-i", audio_path,
+                "-filter_complex",
+                f"[0:v]tpad=stop_mode=clone:stop_duration={freeze_needed:.4f}[vout]",
+                "-map", "[vout]", "-map", "1:a:0",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k",
+                "-t", f"{tts_dur:.4f}", block_out,
+            ]
+        else:
+            mux_cmd = [
+                ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", clip_video,
+                "-i", audio_path,
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                "-t", f"{tts_dur:.4f}", block_out,
+            ]
         r = subprocess.run(mux_cmd, **FFmpegUtils.subprocess_kwargs(
             capture_output=True, text=True, timeout=120
         ))
