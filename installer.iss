@@ -17,7 +17,7 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=installer_output
 OutputBaseFilename=BoomReview-Setup-v{#MyAppVersion}-win64
-SetupIconFile=dist\main.dist\assets\boom_icon.ico
+SetupIconFile=dist\BoomReview.dist\assets\boom_icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -35,7 +35,7 @@ Name: "desktopicon"; Description: "Tạo shortcut trên Desktop"; GroupDescripti
 
 [Files]
 ; Toàn bộ nội dung build Nuitka
-Source: "dist\main.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\BoomReview.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
