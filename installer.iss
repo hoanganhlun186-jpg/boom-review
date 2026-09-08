@@ -34,10 +34,8 @@ Name: "vietnamese"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Tạo shortcut trên Desktop"; GroupDescription: "Shortcut:"; Flags: checkedonce
 
 [Files]
-; Launcher exe (nằm ngoài thư mục .dist)
-Source: "dist\BoomReview.exe"; DestDir: "{app}"; Flags: ignoreversion
-; Toàn bộ DLL + assets - giữ đúng tên main.dist (launcher tìm thư mục này)
-Source: "dist\main.dist\*"; DestDir: "{app}\main.dist"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Nuitka đặt BoomReview.exe bên trong main.dist\ → copy flat vào {app}
+Source: "dist\main.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
