@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.15"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.16"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 import re, shutil, io, math, unicodedata, tempfile
 
@@ -1746,7 +1746,7 @@ class App(PreviewEditorMixin, QMainWindow):
                     break
                 return os.path.dirname(last_job)
             return current_abs
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "exports")
+        return os.path.join(os.path.expanduser("~"), "Documents", "BoomReview", "exports")
 
     def _read_output_job_marker(self, output_dir: str) -> dict:
         try:
@@ -2047,7 +2047,7 @@ class App(PreviewEditorMixin, QMainWindow):
         except Exception:
             output_dir = ""
         if not output_dir:
-            output_dir = os.path.join(os.getcwd(), "exports")
+            output_dir = os.path.join(os.path.expanduser("~"), "Documents", "BoomReview", "exports")
         os.makedirs(output_dir, exist_ok=True)
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(filename or "")).strip("._")
         if not safe_name:
@@ -4138,7 +4138,7 @@ class App(PreviewEditorMixin, QMainWindow):
     def _save_review_package_assets(self, script_text, srt_text):
         out_dir = self.output_dir.get().strip() if hasattr(self, "output_dir") else ""
         if not out_dir:
-            out_dir = os.getcwd()
+            out_dir = os.path.join(os.path.expanduser("~"), "Documents", "BoomReview", "exports")
         os.makedirs(out_dir, exist_ok=True)
 
         base = self.movie_name.get().strip() if hasattr(self, "movie_name") else "review"
@@ -6053,7 +6053,7 @@ Tạo JSON ngay."""
                     raise StopIteration  # skip fallback, already have tts from enhanced pipeline
                 output_dir = self.output_dir.get().strip() if hasattr(self, "output_dir") else ""
                 if not output_dir:
-                    output_dir = os.getcwd()
+                    output_dir = os.path.join(os.path.expanduser("~"), "Documents", "BoomReview", "exports")
                 os.makedirs(output_dir, exist_ok=True)
                 tts_path = os.path.abspath(os.path.join(output_dir, "temp_v2_advanced.mp3"))
                 tts_clean_script = AIEngine._clean_tts_text(full_script)
