@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.19"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.20"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
