@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.20"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.21"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
@@ -1037,6 +1037,25 @@ class App(PreviewEditorMixin, QMainWindow):
         self.gemini_web_status_label = QLabel_CTK(text="Đang kiểm tra phiên...", text_color="#94a3b8")
         gemini_row.layout().addWidget(self.gemini_web_status_label, 1)
         self.container._add(gemini_row)
+
+        # ── Số Chrome song song ───────────────────────────────────────────────
+        chrome_row = self._make_row()
+        self._add_label_to_row(chrome_row, "Chrome song song:", 120)
+        self.gemini_workers_combo = QComboBox()
+        for i in range(1, 6):
+            self.gemini_workers_combo.addItem(f"{i} Chrome", i)
+        self.gemini_workers_combo.setFixedWidth(110)
+        self.gemini_workers_combo.setToolTip(
+            "Số cửa sổ Chrome chạy cùng lúc khi dùng Gemini Web.\n"
+            "Nhiều hơn = nhanh hơn nhưng dễ bị Gemini giới hạn.\n"
+            "Khuyến nghị: 1-3."
+        )
+        self.gemini_workers_combo.currentIndexChanged.connect(self._on_gemini_workers_changed)
+        chrome_row.layout().addWidget(self.gemini_workers_combo)
+        lbl_workers = QLabel_CTK(text="(1 = tuần tự, 2-5 = song song)", text_color="#94a3b8")
+        chrome_row.layout().addWidget(lbl_workers, 1)
+        self.container._add(chrome_row)
+        # ─────────────────────────────────────────────────────────────────────
 
         self.movie_name        = self.create_entry("Tên phim:", "Ví dụ: Người Nhện")
         self.movie_description = self.create_text_area("Tóm tắt nội dung phim:",
@@ -2456,6 +2475,14 @@ class App(PreviewEditorMixin, QMainWindow):
         except Exception:
             pass
 
+    def _on_gemini_workers_changed(self):
+        try:
+            n = self.gemini_workers_combo.currentData() or 1
+            from core.gemini_web import set_max_workers
+            set_max_workers(n)
+        except Exception:
+            pass
+
     def _refresh_gemini_web_login_status(self):
         try:
             from core.gemini_web import is_profile_ready
@@ -2477,7 +2504,19 @@ class App(PreviewEditorMixin, QMainWindow):
     def _gemini_web_login_worker(self):
         driver = None
         try:
-            from core.gemini_web import create_auto_driver, wait_for_gemini_login
+            from core.gemini_web import (
+                create_auto_driver, wait_for_gemini_login,
+                _default_profile_dir, _AUTH_FILE, _LOGIN_MARKER,
+            )
+
+            # Xóa phiên cũ trước khi login mới (tránh báo thành công giả)
+            import pathlib
+            _profile = pathlib.Path(_default_profile_dir())
+            for _fname in (_LOGIN_MARKER, _AUTH_FILE):
+                try:
+                    (_profile / _fname).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
             # A stale/headless shared session can lock the persistent profile.
             AIEngine.close_web_driver()

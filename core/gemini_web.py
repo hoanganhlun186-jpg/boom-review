@@ -397,59 +397,57 @@ def wait_for_gemini_login(
     timeout: int = 300,
     log: Optional[Callable] = None,
 ) -> bool:
-    """Chờ user đăng nhập Gemini trong cửa sổ Chrome hiển thị.
-    Sau khi phát hiện ô chat → lưu marker + storage_state (auth.json).
+    """Chờ user đăng nhập Gemini — copy y chang logic translate_tab.py.
+
+    Loop 100 vòng × 3s, mỗi vòng check:
+      is_guest   = có nút 'sign in / đăng nhập' không
+      has_chatbox= có ô rich-textarea hoặc textbox không
+      logged_in  = not is_guest AND has_chatbox
+    Khi logged_in → lưu storage_state (auth.json) + marker file.
     """
     if log is None: log = lambda m: logger.info(m)
 
-    page     = driver._page
-    deadline = time.time() + max(15, int(timeout or 300))
-    last_notice = 0.0
+    page = driver._page
+    log("⏳ Trình duyệt đang chạy. Nếu chưa đăng nhập, vui lòng thực hiện trên màn hình...\n")
 
+    # ── Bắt buộc navigate đến Gemini trước (copy translate_tab.py line 129) ──
     try:
-        current_url = page.url or ""
-    except Exception:
-        current_url = ""
+        page.goto(_GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(2000)
+    except Exception as e:
+        log(f"   ⚠️ Không mở được Gemini: {e}")
 
-    if "gemini.google.com" not in current_url.lower():
+    logged_in = False
+    iters = max(1, int(timeout or 300) // 3)   # 300s ÷ 3s = 100 vòng
+
+    for _ in range(iters):
         try:
-            page.goto(_GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
-        except Exception as e:
-            log(f"   ⚠️ Navigate đến Gemini lỗi: {e}")
-
-    log("   Đăng nhập Google trong cửa sổ Chrome. App đang chờ ô chat Gemini...")
-
-    while time.time() < deadline:
-        try:
-            current_url = page.url or ""
+            is_guest = page.evaluate('''() => {
+                const btns = Array.from(document.querySelectorAll('a, button, span'));
+                return btns.some(el => {
+                    const txt = (el.innerText || "").trim().toLowerCase();
+                    return txt === 'sign in' || txt === 'đăng nhập';
+                });
+            }''')
+            has_chatbox = (
+                page.query_selector("rich-textarea div.ql-editor")
+                or page.query_selector("div[contenteditable='true'][role='textbox']")
+            )
+            if not is_guest and has_chatbox:
+                logged_in = True
+                break
         except Exception:
-            current_url = ""
+            pass
+        page.wait_for_timeout(3000)
 
-        if "gemini.google.com" not in current_url.lower():
-            time.sleep(1); continue
-
-        try:
-            for sel in _INPUT_SELS:
-                el = page.query_selector(sel)
-                if el and el.is_visible():
-                    # ── Lưu marker + storage_state ────────────────
-                    mark_profile_ready(driver)
-                    _save_auth_state(driver._ctx, log)
-                    log("   ✅ Đăng nhập Gemini Web thành công, phiên đã được lưu")
-                    return True
-        except Exception as exc:
-            msg = str(exc).lower()
-            if any(k in msg for k in ("target closed","invalid session","no such window")):
-                raise RuntimeError("Cửa sổ Chrome đăng nhập đã bị đóng") from exc
-
-        now = time.time()
-        if now - last_notice >= 15:
-            log(f"   ⏳ Đang chờ đăng nhập Gemini Web... còn {max(0,int(deadline-now))}s")
-            last_notice = now
-        time.sleep(1)
-
-    log("   ⚠️ Chưa xác nhận được ô chat Gemini trong thời gian chờ")
-    return False
+    if logged_in:
+        mark_profile_ready(driver)
+        _save_auth_state(driver._ctx, log)
+        log("✅ Đăng nhập hợp lệ. Phiên đã được lưu.\n")
+        return True
+    else:
+        log("❌ Quá thời gian đăng nhập hoặc thất bại.\n")
+        return False
 
 
 def _save_auth_state(ctx, log=None):
@@ -619,6 +617,15 @@ def send_prompt_parallel(
 # ══════════════════════════════════════════════════════════════════
 # Backward-compat
 # ══════════════════════════════════════════════════════════════════
+
+def clear_auth() -> None:
+    """Xóa marker + auth.json — gọi trước khi login lại để tránh báo thành công giả."""
+    profile_dir = pathlib.Path(_default_profile_dir())
+    for fname in (_LOGIN_MARKER, _AUTH_FILE):
+        try:
+            (profile_dir / fname).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 def is_selenium_available() -> bool:
     try:
