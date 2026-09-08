@@ -140,6 +140,26 @@ jobs:
         print('Done copying assets')
         "
 
+    - name: Package into ZIP (portable / auto-update)
+      shell: pwsh
+      run: |
+        $pkg = "BoomReview"
+        $dist = "dist\main.dist"
+        if (-not (Test-Path $dist)) {
+            Write-Error "KHONG THAY $dist - build Nuitka that bai"; exit 1
+        }
+        if (Test-Path $pkg) { Remove-Item $pkg -Recurse -Force }
+        Rename-Item $dist $pkg
+
+        if (-not (Test-Path "$pkg\BoomReview.exe")) {
+            Write-Error "THIEU BoomReview.exe trong goi"; exit 1
+        }
+
+        "Giai nen thu muc nay ra 1 cho co dinh roi chay BoomReview.exe." | Out-File -FilePath "$pkg\HUONG_DAN.txt" -Encoding utf8
+
+        Compress-Archive -Path $pkg -DestinationPath "BoomReview.zip" -Force
+        Write-Host "Da tao BoomReview.zip"
+
     - name: Install Inno Setup
       run: choco install innosetup --yes
 
@@ -154,7 +174,9 @@ jobs:
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
       with:
-        files: installer_output/BoomReview-Setup-*.exe
+        files: |
+          installer_output/BoomReview-Setup-*.exe
+          BoomReview.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -165,7 +187,7 @@ jobs:
       run: |
         $version = $env:VERSION.TrimStart('v')
         $Url = "http://163.61.182.119:8000/api/admin/publish_update_boomreview"
-        $DownloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/BoomReview-Setup-v${version}-win64.exe"
+        $DownloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/BoomReview.zip"
         $Body = @{
             latest_version = $version
             download_url = $DownloadUrl

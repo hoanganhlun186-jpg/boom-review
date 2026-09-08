@@ -1,21 +1,19 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.18"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.19"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
 # Phải set TRƯỚC khi import bất kỳ thứ gì từ PySide6/Qt
 if "__compiled__" in dir() or getattr(sys, "frozen", False):
-    _app_dir = os.path.dirname(sys.executable)
+    # Nuitka: sys.executable = đường dẫn đến BoomReview.exe trong thư mục dist
+    _app_dir = os.path.dirname(os.path.abspath(sys.executable))
     _qt_plugin_path = os.path.join(_app_dir, "PySide6", "plugins")
-    os.environ.setdefault("QT_PLUGIN_PATH", _qt_plugin_path)
-    os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH",
-                          os.path.join(_qt_plugin_path, "platforms"))
-    # Đảm bảo multimedia backend (Windows Media Foundation) được tìm thấy
-    _mm_plugin = os.path.join(_qt_plugin_path, "multimedia")
-    if os.path.isdir(_mm_plugin):
-        os.environ.setdefault("QT_MULTIMEDIA_PREFERRED_PLUGINS", "windowsmediafoundation")
+    if os.path.isdir(_qt_plugin_path):
+        # Qt6 dùng QT_PLUGIN_PATH để tìm tất cả plugins (multimedia, platforms, ...)
+        os.environ["QT_PLUGIN_PATH"] = _qt_plugin_path
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(_qt_plugin_path, "platforms")
 # ─────────────────────────────────────────────────────────────────────────────
 import re, shutil, io, math, unicodedata, tempfile
 
@@ -6950,23 +6948,15 @@ def run_app():
     app = App()
     app.show()
 
-    # ── Update check ngầm sau 5 giây ─────────────────────────────────────────
-    def _start_update_check():
+    # ── Auto-update: kiểm tra bản mới sau 3 giây ─────────────────────────────
+    def _delayed_update_check():
         try:
-            from engine.updater import check_update_async, show_update_dialog
-
-            def on_update_result(result):
-                if result:
-                    show_update_dialog(app, result)
-
-            def _delayed_check():
-                check_update_async(on_update_result)
-
-            QTimer.singleShot(5000, _delayed_check)
+            from auto_updater import check_for_update
+            check_for_update(APP_VERSION, parent=app)
         except Exception:
             pass
 
-    QTimer.singleShot(100, _start_update_check)
+    QTimer.singleShot(3000, _delayed_update_check)
     # ─────────────────────────────────────────────────────────────────────────
     sys.exit(qapp.exec())
 
