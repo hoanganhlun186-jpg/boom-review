@@ -1,8 +1,22 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.16"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.17"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
+
+# ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
+# Phải set TRƯỚC khi import bất kỳ thứ gì từ PySide6/Qt
+if "__compiled__" in dir() or getattr(sys, "frozen", False):
+    _app_dir = os.path.dirname(sys.executable)
+    _qt_plugin_path = os.path.join(_app_dir, "PySide6", "plugins")
+    os.environ.setdefault("QT_PLUGIN_PATH", _qt_plugin_path)
+    os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH",
+                          os.path.join(_qt_plugin_path, "platforms"))
+    # Đảm bảo multimedia backend (Windows Media Foundation) được tìm thấy
+    _mm_plugin = os.path.join(_qt_plugin_path, "multimedia")
+    if os.path.isdir(_mm_plugin):
+        os.environ.setdefault("QT_MULTIMEDIA_PREFERRED_PLUGINS", "windowsmediafoundation")
+# ─────────────────────────────────────────────────────────────────────────────
 import re, shutil, io, math, unicodedata, tempfile
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageFilter

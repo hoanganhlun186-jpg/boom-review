@@ -164,7 +164,7 @@ jobs:
         VERSION: ${{ github.ref_name }}
       run: |
         $version = $env:VERSION.TrimStart('v')
-        $Url = "http://163.61.182.119:8000/api/admin/publish_update"
+        $Url = "http://163.61.182.119:8000/api/admin/publish_update_boomreview"
         $DownloadUrl = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/BoomReview-Setup-v${version}-win64.exe"
         $Body = @{
             latest_version = $version
