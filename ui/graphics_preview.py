@@ -2,16 +2,20 @@
 
 Scene coordinates are output pixels. No video decoding or PIL composition
 runs in mouse handlers. The UI and renderer share normalized design values.
+
+FIX (Nuitka standalone): QGraphicsVideoItem dùng Direct3D hardware rendering,
+không hoạt động trong bản build. Thay bằng QVideoSink + QGraphicsPixmapItem:
+mỗi frame được convert sang QImage rồi vẽ lên scene — hoạt động mọi nơi.
 """
 import os
 from bisect import bisect_right
 
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QUrl, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPixmap, QImage
 from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsObject,
-                               QGraphicsItem, QGraphicsRectItem, QGraphicsSimpleTextItem)
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+                               QGraphicsItem, QGraphicsRectItem, QGraphicsSimpleTextItem,
+                               QGraphicsPixmapItem)
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
 from core.preview_design import normalized_box, resize_box, title_padding
 
 
@@ -235,16 +239,26 @@ class GraphicsPreview(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setViewportUpdateMode(QGraphicsView.MinimalViewportUpdate)
-        self.video = QGraphicsVideoItem()
+
+        # ── Video rendering: QVideoSink + QGraphicsPixmapItem ──────────────────
+        # QGraphicsVideoItem dùng Direct3D hardware, không hoạt động trong Nuitka
+        # standalone builds. QVideoSink nhận từng frame → convert QImage → pixmap,
+        # đảm bảo hoạt động trên mọi máy không cần driver đặc biệt.
+        self.video = QGraphicsPixmapItem()
         self.video.setAcceptedMouseButtons(Qt.NoButton)
+        self.video.setZValue(0)
         self.scene().addItem(self.video)
+        self._video_sink = QVideoSink(self)
+        self._video_sink.videoFrameChanged.connect(self._on_video_frame)
+        self._video_frame_size = (0, 0)
+        # ──────────────────────────────────────────────────────────────────────
+
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.audio.setMuted(False)
         self.audio.setVolume(.7)
         self.player.setAudioOutput(self.audio)
-        self.player.setVideoOutput(self.video)
-        self.video.nativeSizeChanged.connect(self._native_size)
+        self.player.setVideoOutput(self._video_sink)
         self.player.positionChanged.connect(self.update_caption)
         self.player.mediaStatusChanged.connect(self._media_status)
         self.logo = OverlayItem(self,'logo')
@@ -263,6 +277,39 @@ class GraphicsPreview(QGraphicsView):
         self._source = ''
         self.sync({}, {})
 
+    def _on_video_frame(self, frame: QVideoFrame):
+        """Nhận frame từ QVideoSink, convert sang QImage rồi hiển thị lên scene."""
+        try:
+            if not frame.isValid():
+                return
+            img = frame.toImage()
+            if img.isNull():
+                return
+            # Detect native size thay cho nativeSizeChanged của QGraphicsVideoItem
+            w, h = img.width(), img.height()
+            if w > 0 and h > 0 and (w, h) != self._video_frame_size:
+                self._video_frame_size = (w, h)
+                try:
+                    self.set_source_size(w, h)
+                    self.sourceSizeChanged.emit(w, h)
+                except Exception:
+                    pass
+            # Scale pixmap về kích thước scene (width_px x height_px) để fit đúng
+            target_w, target_h = max(1, self.width_px), max(1, self.height_px)
+            if w != target_w or h != target_h:
+                img = img.scaled(target_w, target_h, Qt.KeepAspectRatio,
+                                 Qt.SmoothTransformation)
+            pixmap = QPixmap.fromImage(img)
+            if pixmap.isNull():
+                return
+            self.video.setPixmap(pixmap)
+            # Căn giữa pixmap trong scene nếu có black bars
+            px_w = pixmap.width()
+            px_h = pixmap.height()
+            self.video.setPos((target_w - px_w) / 2, (target_h - px_h) / 2)
+        except Exception:
+            pass  # Không crash app khi frame lỗi
+
     def set_source(self,path):
         path = os.path.abspath(path)
         if path == self._source:
@@ -280,6 +327,7 @@ class GraphicsPreview(QGraphicsView):
                 self.player.pause()
 
     def _native_size(self,size):
+        # Kept for compatibility — size detection now done in _on_video_frame
         if size.width()>0 and size.height()>0:
             self.set_source_size(round(size.width()),round(size.height()))
             self.sourceSizeChanged.emit(self.width_px,self.height_px)
@@ -304,7 +352,6 @@ class GraphicsPreview(QGraphicsView):
         changed = frame != self.sceneRect()
         self.scene().setSceneRect(frame)
         self.video.setPos(0,0)
-        self.video.setSize(QSizeF(w,h))
         for item in self.title_items:
             self.scene().removeItem(item)
         self.title_items.clear()
