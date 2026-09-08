@@ -92,6 +92,8 @@ jobs:
           --include-package-data=curl_cffi `
           --include-package-data=PIL `
           --include-package-data=scipy `
+          --include-package=PySide6.QtMultimedia `
+          --include-package=PySide6.QtMultimediaWidgets `
           --enable-plugin=pyside6 `
           --enable-plugin=numpy `
           --enable-plugin=tk-inter `
@@ -109,6 +111,15 @@ jobs:
 
         # assets (icon, font, ...)
         shutil.copytree('assets', dist / 'assets', dirs_exist_ok=True)
+
+        # Qt multimedia plugins (cần cho preview video)
+        import PySide6
+        qt_root = Path(PySide6.__file__).parent
+        for plugin_name in ['multimedia', 'mediaservice', 'playlistformats']:
+            src_plugin = qt_root / 'plugins' / plugin_name
+            if src_plugin.exists():
+                shutil.copytree(src_plugin, dist / 'PySide6' / 'plugins' / plugin_name, dirs_exist_ok=True)
+                print(f'Copied Qt plugin: {plugin_name}')
 
         # certifi CA bundle
         shutil.copy2(certifi.where(), dist / 'cacert.pem')

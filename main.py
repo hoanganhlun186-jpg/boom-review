@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.14"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.15"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 import re, shutil, io, math, unicodedata, tempfile
 
@@ -855,7 +855,8 @@ class App(PreviewEditorMixin, QMainWindow):
         self.bgm_path      = self.create_file_input("Nhạc nền (tuỳ chọn):")
         self.srt_path      = self.create_file_input("SRT thoại nguồn (tự tạo/đã dịch):")
         self.output_dir    = self.create_file_input("Nơi lưu:", is_dir=True)
-        default_exports = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exports")
+        # Dùng Documents\BoomReview thay vì Program Files (không cần admin)
+        default_exports = os.path.join(os.path.expanduser("~"), "Documents", "BoomReview", "exports")
         os.makedirs(default_exports, exist_ok=True)
         self.output_dir.insert(0, default_exports)
 
@@ -3179,8 +3180,10 @@ class App(PreviewEditorMixin, QMainWindow):
             return
         video_path = self.video_path.get().strip() if hasattr(self, "video_path") else ""
         if not video_path or not os.path.exists(video_path):
-            self.log.insert("end", "❌ Vui lòng chọn video gốc trước.\n")
-            self.log.see("end")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Chưa chọn video",
+                "❌ Vui lòng chọn Video gốc trước khi chạy Full Pipeline.\n\n"
+                "Vào tab '1. Dự án' → bấm 📁 ở ô 'Video gốc' để chọn file.")
             return
         output_dir = self._ensure_video_output_dir(video_path, force_new=False, update_entries=True)
         if not output_dir:
@@ -3233,9 +3236,11 @@ class App(PreviewEditorMixin, QMainWindow):
                 self._active_script_editor = None
 
         video_path = self.video_path.get().strip() if hasattr(self, "video_path") else ""
-        if not video_path:
-            self.log.insert("end", "❌ Vui lòng chọn video gốc trước.\n")
-            self.log.see("end")
+        if not video_path or not os.path.exists(video_path):
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Chưa chọn video",
+                "❌ Vui lòng chọn Video gốc trước khi chạy Full Pipeline.\n\n"
+                "Vào tab '1. Dự án' → bấm 📁 ở ô 'Video gốc' để chọn file.")
             return
         output_dir = self._ensure_video_output_dir(video_path, force_new=False, update_entries=False)
         ai_pkg_path = os.path.join(output_dir, "ai_package.json") if output_dir else ""
@@ -6602,7 +6607,10 @@ Tạo JSON ngay."""
         """Khởi chạy Full Pipeline - có thể gọi trực tiếp từ thread hoặc từ UI."""
         video_path = self.video_path.get().strip() if hasattr(self, "video_path") else ""
         if not video_path or not os.path.exists(video_path):
-            self._thread_safe_log("❌ Vui lòng chọn video gốc trước khi chạy Full Pipeline.\n")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Chưa chọn video",
+                "❌ Vui lòng chọn Video gốc trước khi chạy Full Pipeline.\n\n"
+                "Vào tab '1. Dự án' → bấm 📁 ở ô 'Video gốc' để chọn file.")
             return
 
         output_dir = self._ensure_video_output_dir(video_path, force_new=False, update_entries=True)

@@ -62,23 +62,14 @@ def _default_profile_dir() -> str:
 
 
 def _profile_has_session(profile_dir: Optional[str] = None) -> bool:
-    """Best-effort check for a previous successful Gemini/Google session."""
-    profile_dir = str(profile_dir or _default_profile_dir())
-    if os.path.isfile(os.path.join(profile_dir, _LOGIN_MARKER)):
-        return True
+    """Best-effort check for a previous successful Gemini/Google session.
 
-    # Preserve compatibility with profiles created by older app versions.
-    for relative in (
-        os.path.join("Default", "Network", "Cookies"),
-        os.path.join("Default", "Cookies"),
-    ):
-        path = os.path.join(profile_dir, relative)
-        try:
-            if os.path.isfile(path) and os.path.getsize(path) > 4096:
-                return True
-        except OSError:
-            continue
-    return False
+    CHỈ dựa vào marker file — cookie check đã bị loại bỏ vì Chrome mới tạo
+    profile cũng có cookies > 4KB, khiến app tưởng đã login và chạy headless
+    dù user chưa đăng nhập lần nào.
+    """
+    profile_dir = str(profile_dir or _default_profile_dir())
+    return os.path.isfile(os.path.join(profile_dir, _LOGIN_MARKER))
 
 
 def is_profile_ready(profile_dir: Optional[str] = None) -> bool:
@@ -141,6 +132,16 @@ def wait_for_gemini_login(
     log("   Đăng nhập Google trong cửa sổ Chrome. App đang chờ ô chat Gemini...")
     while time.time() < deadline:
         try:
+            # PHẢI đang ở gemini.google.com mới tính là đã login
+            try:
+                current_url = str(driver.current_url or "").lower()
+            except Exception:
+                current_url = ""
+            if "gemini.google.com" not in current_url:
+                # Chưa vào Gemini, tiếp tục chờ
+                time.sleep(1)
+                continue
+
             for selector in _INPUT_SELECTORS:
                 for element in driver.find_elements(By.CSS_SELECTOR, selector):
                     try:
