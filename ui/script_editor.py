@@ -1164,7 +1164,7 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
             )
             self._ai_fix_running = True
             self._safe_confirm_button("disabled", "ĐANG AI SỬA TỰ ĐỘNG...")
-            threading.Thread(target=self._ai_fix_worker, args=(targets,), daemon=True).start()
+            self._start_ai_fix_worker(targets)
         else:
             # Không có block lỗi → xác nhận ngay
             self._safe_status("Auto: không có block lỗi, tự động xác nhận tạo voice...", "#22c55e")
@@ -1180,7 +1180,7 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
         self._ai_fix_running = True
         self._safe_confirm_button("disabled", "\u0110ANG AI S\u1eeca...")
         self._safe_status(f"AI s\u1eeda review: \u0111ang g\u1ecdi Gemini Web s\u1eeda {len(targets)} block l\u1ed7i theo nh\u00f3m 10", "#60a5fa")
-        threading.Thread(target=self._ai_fix_worker, args=(targets,), daemon=True).start()
+        self._start_ai_fix_worker(targets)
 
     def _review_single_block(self, idx: int, box, block: dict, dur: float):
         """Send exactly one block to the same Gemini repair path used by AI sửa review."""
@@ -1198,25 +1198,31 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
         self._ai_fix_running = True
         self._safe_confirm_button("disabled", "ĐANG AI SỬA...")
         self._safe_status(f"Review block {bid}: đang gọi Gemini Web", "#60a5fa")
-        threading.Thread(target=self._ai_fix_worker, args=([(idx, box, block, dur)],), daemon=True).start()
+        self._start_ai_fix_worker([(idx, box, block, dur)])
 
-    def _ai_fix_worker(self, targets):
+    def _start_ai_fix_worker(self, targets):
+        # Tk widgets must be read on their owning UI thread, before dispatch.
+        current_text_by_id = {
+            _block_id(block, idx): _clean_text(box.get("1.0", "end"))
+            for idx, (box, block, _rate_lbl, _dur) in enumerate(self._block_entries, 1)
+        }
+        threading.Thread(
+            target=self._ai_fix_worker, args=(targets, current_text_by_id), daemon=True
+        ).start()
+
+    def _ai_fix_worker(self, targets, current_text_by_id):
         fixed = 0
         error = None
         try:
             from engine.ai_engine import AIEngine
             ai = AIEngine(getattr(self.pipeline, "gemini_api_key", "") or os.environ.get("GEMINI_API_KEY", ""))
             movie_title = getattr(self.pipeline, "movie_title", "") or self.ai_pkg.get("movie_title") or "phim"
-            current_text_by_id = {
-                _block_id(block, idx): _clean_text(box.get("1.0", "end"))
-                for idx, (box, block, _rate_lbl, _dur) in enumerate(self._block_entries, 1)
-            }
             for start in range(0, len(targets), 10):
                 batch = targets[start:start+10]
                 payload = []
                 for idx, _box, block, dur in batch:
                     bid = _block_id(block, idx)
-                    current = _clean_text(_box.get("1.0", "end"))
+                    current = current_text_by_id.get(bid, "")
                     if self._uses_recap2_budget_flow():
                         preferred_words = max(12, int(block.get("target_words") or len(current.split()) or 24))
                         min_words = max(8, int(preferred_words * 0.65))
@@ -1314,7 +1320,7 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
                 for idx, box, block, _dur in batch:
                     bid = _block_id(block, idx)
                     text = by_id.get(bid)
-                    if text and len(text.split()) >= 5:
+                    if text and len(text.split()) >= 5 and text != current_text_by_id.get(bid, ""):
                         text = _clean_text(text)
                         block.pop("_duplicate_text", None)
                         block.pop("_duplicate_of_block", None)
@@ -1323,15 +1329,7 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
                         fixed += 1
         except Exception as exc:
             error = str(exc)
-            # Deterministic fallback: at least clean empty/duplicate artifacts.
-            for idx, box, block, _dur in targets:
-                text = _clean_text(box.get("1.0", "end")) or self._evidence_for(block, idx)
-                if text and len(text.split()) < 12:
-                    text += " Nhịp này làm áp lực tăng lên và kéo câu chuyện sang bước ngoặt tiếp theo."
-                if text:
-                    text = _clean_text(text)
-                    self._safe_after(0, lambda b=box, t=text: (b.delete("1.0", "end"), b.insert("1.0", t)))
-                    fixed += 1
+            # Keep original narration on failure; never invent filler as a repair.
         finally:
             try:
                 from engine.ai_engine import AIEngine
@@ -1342,15 +1340,15 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
             def finish():
                 self._ai_fix_running = False
                 self._safe_confirm_button("normal", "XÁC NHẬN - TẠO VOICE")
-                deduped = self._dedupe_current_entries()
+                deduped = 0
                 self._save_blocks(silent=True)
                 self._render_blocks()
                 if error:
-                    self._safe_status(f"AI lỗi, đã dùng sửa nội bộ: {fixed} block, chống trùng {deduped} block ({error[:70]})", "#f59e0b")
+                    self._safe_status(f"AI sửa chưa hoàn tất: cập nhật {fixed} block; giữ nội dung cũ ở block chưa sửa ({error[:70]})", "#f59e0b")
                 else:
                     self._safe_status(f"AI sửa review đã sửa {fixed}/{len(targets)} block, chống trùng {deduped} block, đã đóng Gemini Web", "#22c55e" if fixed else "#f59e0b")
                 # auto_fix mode: sau khi sửa xong, nếu không còn block lỗi → tự xác nhận
-                if self._auto_fix:
+                if self._auto_fix and not error:
                     remaining = self._blocks_needing_ai()
                     if remaining:
                         self._safe_status(
@@ -1749,6 +1747,21 @@ class ScriptEditorWindow(ctk.CTkToplevel if ctk else object):
         empties = [i for i, b in enumerate(self.script_blocks, 1) if not _clean_text(b.get("text"))]
         if empties:
             self._safe_status(f"C\u00f2n {len(empties)} block tr\u1ed1ng: {', '.join(map(str, empties[:20]))}", "#f87171")
+            return
+        # Use the same exact-duplicate check as the pre-TTS quality gate.
+        from engine.market_readiness import MarketReadinessValidator
+        duplicate_issues, _ = MarketReadinessValidator._repetition_report(self.script_blocks)
+        if any(item.get("type") == "duplicate_script_blocks" for item in duplicate_issues):
+            seen = {}
+            pairs = []
+            for index, block in enumerate(self.script_blocks, 1):
+                text = re.sub(r"\s+", " ", str(block.get("text") or "").lower()).strip()
+                bid = _block_id(block, index)
+                if text in seen:
+                    pairs.append(f"{bid} trùng {seen[text]}")
+                elif text:
+                    seen[text] = bid
+            self._safe_status("Chưa tạo voice: block " + "; ".join(pairs) + ". Cần sửa đúng nội dung từng cảnh.", "#f87171")
             return
         self._confirmed = True
         self._release_video_preview()

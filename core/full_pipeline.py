@@ -1,4 +1,4 @@
-﻿"""
+"""
 AutoRecapPro V2 - Full 11-Step Pipeline
 ========================================
 Thứ tự pipeline hoàn chỉnh:
@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable
 
 from utils.helpers import FFmpegUtils
+from utils.async_bridge import run_async_task
 
 try:
     from core.review_styles import normalize_review_style
@@ -1615,6 +1616,9 @@ class FullPipeline:
             result = step_fn()
             if result:
                 return True
+            if step_name == "VOICE_SRT" and self.steps["VOICE_SEGMENTS"].status == "failed":
+                self._log("   ❌ Dừng VOICE_SRT vì bước voice chưa hoàn tất: " + str(self.steps["VOICE_SEGMENTS"].error))
+                return False
             if attempt < max_retries:
                 self._log(f"   ⚠️  [{step_name}] Lần {attempt} thất bại, sẽ tự thử lại...")
         self._log(f"   ❌ [{step_name}] Thất bại sau {max_retries} lần thử.")
@@ -3286,6 +3290,10 @@ class FullPipeline:
                         self._log(f"   ⚠️ Map-Reduce cho {len(map_reduce_script_blocks)} blocks (< 3) → fallback")
                         map_reduce_script_blocks = []
                 except Exception as mr_e:
+                    from core.recap_engine import RecapGenerationError
+                    if isinstance(mr_e, RecapGenerationError):
+                        self._step_fail("AI_FULL", str(mr_e))
+                        return False
                     self._log(f"   ⚠️ Map-Reduce lỗi: {mr_e} → fallback sang single-shot")
                     map_reduce_script_blocks = []
 
@@ -5505,7 +5513,7 @@ class FullPipeline:
                 timing_repair = {"action": "none"}
                 tts_dur = 0.0
                 for attempt in range(2):
-                    asyncio.run(ai.text_to_speech(combined, raw_path, voice=self.voice, rate="+0%"))
+                    run_async_task(ai.text_to_speech, combined, raw_path, voice=self.voice, rate="+0%")
                     tts_dur = _probe_dur(raw_path)
                     if self.ai_package.get("recap2_beat_mode"):
                         repair = {"action": "none", "changed": False, "reason": "recap2_beat_flow"}
@@ -5794,7 +5802,7 @@ class FullPipeline:
                         block_rate = "+0%"
                     block_rate = _clamp_tts_rate(block_rate)
                     for attempt in range(2):
-                        asyncio.run(ai.text_to_speech(clean, raw_path, voice=self.voice, rate=block_rate))
+                        run_async_task(ai.text_to_speech, clean, raw_path, voice=self.voice, rate=block_rate)
 
                         if not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
                             self._log(f"   block {bid}: TTS rong, bo qua")
@@ -5892,7 +5900,7 @@ class FullPipeline:
                             if opt_rate != block_rate:  # tránh retry vô ích
                                 self._log(f"   block {bid}: auto-fix rate {block_rate}→{opt_rate} (ratio {final_ratio:.2f})")
                                 retry_raw = os.path.join(segments_dir, f"retry_{bid:04d}.mp3")
-                                asyncio.run(ai.text_to_speech(clean, retry_raw, voice=self.voice, rate=opt_rate))
+                                run_async_task(ai.text_to_speech, clean, retry_raw, voice=self.voice, rate=opt_rate)
                                 if os.path.exists(retry_raw) and os.path.getsize(retry_raw) > 0:
                                     retry_dur = _probe_dur(retry_raw)
                                     retry_ratio = retry_dur / target_dur if target_dur > 0 else 1.0
@@ -6419,10 +6427,29 @@ class FullPipeline:
 
     def _repair_recorded_voice_alignment(self) -> bool:
         """Repair failed scene anchors and regenerate audio before writing SRT."""
+        # Never rewrite the script to compensate for a failed TTS execution.
+        if self.steps["VOICE_SEGMENTS"].status == "failed":
+            self._log("   ❌ TTS đang lỗi. Cần tạo lại voice thành công trước khi kiểm tra nội dung; giữ nguyên kịch bản.")
+            return False
+        if not self.voice_segments or any(
+            not seg.get("audio_path")
+            or not os.path.isfile(seg["audio_path"])
+            or os.path.getsize(seg["audio_path"]) == 0
+            for seg in self.voice_segments
+        ):
+            self._log("   ❌ Thiếu file voice hợp lệ; giữ nguyên kịch bản và tạo lại TTS trước.")
+            return False
         from core.srt_alignment import SrtAlignmentValidator
         from core.ai_engine import AIEngine
         import copy
         try:
+            if self.ai_package.get("script_editor_synced") or any(
+                block.get("script_editor_locked")
+                for block in self.ai_package.get("script_blocks", [])
+                if isinstance(block, dict)
+            ):
+                self._log("   🔒 Giữ nguyên lời đã duyệt trong Script Editor; không tự viết lại sau khi tạo voice.")
+                return True
             for attempt in range(3):
                 package = copy.deepcopy(self.ai_package)
                 spoken = {int(seg['block_id']): seg.get('text','') for seg in self.voice_segments}

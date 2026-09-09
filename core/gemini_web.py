@@ -141,7 +141,8 @@ def is_profile_ready(profile_dir=None) -> bool:
     return _profile_has_session(profile_dir)
 
 def _prefer_headless() -> bool:
-    mode = str(os.environ.get("AUTORECAP_GEMINI_WEB_HEADLESS", "auto") or "auto").strip().lower()
+    # Show Gemini by default so users can inspect prompts and responses.
+    mode = str(os.environ.get("AUTORECAP_GEMINI_WEB_HEADLESS", "0") or "0").strip().lower()
     if mode in {"0", "false", "no", "off", "visible", "show"}:
         return False
     if mode in {"1", "true", "yes", "on", "headless", "hidden"}:
@@ -213,48 +214,36 @@ def _find_input(page):
     return None
 
 def _inject_text(page, text: str):
-    page.evaluate(
-        '''(text) => {
-            const el = document.activeElement?.contentEditable === "true"
-                ? document.activeElement
-                : document.querySelector("[contenteditable='true']");
-            if (el) {
-                el.focus();
-                el.innerText = text;
-                el.dispatchEvent(new Event("input", {bubbles: true}));
-                el.dispatchEvent(new InputEvent("input", {bubbles: true, data: text}));
-            }
-        }''', text)
-    page.wait_for_timeout(300)
-    page.keyboard.press("End")
-    page.keyboard.press("Space")
-    page.wait_for_timeout(200)
+    editor = _find_input(page)
+    if editor is None:
+        raise RuntimeError("Không tìm thấy ô nhập Gemini")
+    editor.fill(text)
+    editor.focus()
+
 
 def _send_message(page) -> bool:
-    btn_clicked = False
-    for sel in _SEND_SELS:
-        try:
-            btn = page.query_selector(sel)
-            if btn and btn.is_visible():
-                if not btn.is_disabled() and btn.get_attribute("aria-disabled") != "true":
-                    btn.click(); btn_clicked = True; break
-        except Exception:
-            continue
-    if not btn_clicked:
-        page.keyboard.press("Enter")
-    page.wait_for_timeout(600)
-    for _ in range(6):
-        try:
-            txt = page.evaluate(
-                '''() => { const el = document.querySelector("[contenteditable='true']");
-                           return el ? (el.innerText || "").trim() : null; }''')
-            if txt is None or txt == "":
-                return True
-        except Exception:
-            pass
-        page.keyboard.press("Enter")
-        page.wait_for_timeout(400)
+    editor = _find_input(page)
+    if editor is None or not editor.inner_text().strip():
+        return False
+    clicked = False
+    for sel in _SEND_SELS + ["button[aria-label='Gửi tin nhắn']", "button[aria-label='Send']"]:
+        for btn in page.query_selector_all(sel):
+            if btn.is_visible() and not btn.is_disabled() and btn.get_attribute("aria-disabled") != "true":
+                btn.click()
+                clicked = True
+                break
+        if clicked:
+            break
+    if not clicked:
+        editor.press("Enter")
+    # Never treat a missing editor as proof that the message was submitted.
+    for _ in range(20):
+        page.wait_for_timeout(500)
+        current = _find_input(page)
+        if current is not None and not current.inner_text().strip():
+            return True
     return False
+
 
 def _get_last_response(page) -> str:
     for sel in _RESP_SELS:
@@ -268,17 +257,25 @@ def _get_last_response(page) -> str:
             continue
     return ""
 
-def _wait_response(page, timeout: int, log: Callable) -> str:
+def _wait_response(page, timeout: int, log: Callable, previous_response: str = "") -> str:
     prev, stable = "", 0
     deadline = time.time() + timeout
     last_log  = 0.0
     page.wait_for_timeout(1000)
     while time.time() < deadline:
         cur = _get_last_response(page)
+        if cur == previous_response:
+            cur = ""
         if cur and cur == prev:
             stable += 1
             if stable >= 8:
-                return cur
+                generating = any(
+                    button.is_visible()
+                    for selector in ("button[aria-label*='Stop response']", "button[aria-label*='Dừng']", "button[aria-label*='Stop generating']")
+                    for button in page.query_selector_all(selector)
+                )
+                if not generating:
+                    return cur
         else:
             stable = 0; prev = cur
         page.wait_for_timeout(500)
@@ -286,7 +283,7 @@ def _wait_response(page, timeout: int, log: Callable) -> str:
         if now - last_log >= 20:
             log(f"   ⏳ Đợi Gemini... còn ~{max(0,int(deadline-now))}s")
             last_log = now
-    return prev or _get_last_response(page)
+    raise TimeoutError("Gemini chưa trả lời mới hoàn tất trong thời gian chờ")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -526,16 +523,15 @@ def send_prompt_to_gemini(
 
         try: inp.click()
         except Exception: pass
+        previous_response = _get_last_response(page)
         _inject_text(page, prompt)
 
         sent = _send_message(page)
         if not sent:
-            log("   ⚠️ Chưa xác nhận gửi, thử Enter lần cuối...")
-            try: page.keyboard.press("Enter")
-            except Exception: pass
+            raise RuntimeError("Chưa xác nhận gửi prompt: nội dung vẫn còn trong ô nhập Gemini")
 
         log("   🚀 Đã gửi prompt, đợi Gemini response...")
-        response = _wait_response(page, timeout, log)
+        response = _wait_response(page, timeout, log, previous_response)
         log(f"   ✅ Response: {len(response)} ký tự" if response else "   ⚠️ Response rỗng")
         return response
 
