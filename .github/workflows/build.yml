@@ -149,7 +149,7 @@ jobs:
             Write-Error "KHONG THAY $dist - build Nuitka that bai"; exit 1
         }
         if (Test-Path $pkg) { Remove-Item $pkg -Recurse -Force }
-        Rename-Item $dist $pkg
+        Copy-Item -LiteralPath $dist -Destination $pkg -Recurse
 
         if (-not (Test-Path "$pkg\BoomReview.exe")) {
             Write-Error "THIEU BoomReview.exe trong goi"; exit 1

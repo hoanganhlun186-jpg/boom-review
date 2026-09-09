@@ -392,19 +392,34 @@ def create_auto_driver(log=None, force_visible: bool = False) -> GeminiDriver:
 # Login
 # ══════════════════════════════════════════════════════════════════
 
+def _has_authenticated_gemini_page(page) -> bool:
+    """Require positive account UI; a guest can also have a chat editor."""
+    return bool(page.evaluate('''() => {
+        if (location.hostname !== 'gemini.google.com') return false;
+        const visible = el => !!(el && el.getClientRects().length &&
+            getComputedStyle(el).visibility !== 'hidden');
+        const controls = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+        const guest = controls.some(el => visible(el) && (
+            /^(sign in|đăng nhập)$/i.test((el.innerText || '').trim()) ||
+            /accounts\\.google\\.com\\/(?:ServiceLogin|signin)/i.test(el.getAttribute('href') || '')
+        ));
+        const account = controls.some(el => visible(el) && (
+            /Google Account|Tài khoản Google/i.test(el.getAttribute('aria-label') || '') ||
+            /accounts\\.google\\.com\\/SignOutOptions/i.test(el.getAttribute('href') || '')
+        ));
+        const editor = Array.from(document.querySelectorAll(
+            'rich-textarea div.ql-editor[contenteditable="true"], div[contenteditable="true"][role="textbox"]'
+        )).some(visible);
+        return !guest && account && editor;
+    }'''))
+
+
 def wait_for_gemini_login(
     driver: GeminiDriver,
     timeout: int = 300,
     log: Optional[Callable] = None,
 ) -> bool:
-    """Chờ user đăng nhập Gemini — copy y chang logic translate_tab.py.
-
-    Loop 100 vòng × 3s, mỗi vòng check:
-      is_guest   = có nút 'sign in / đăng nhập' không
-      has_chatbox= có ô rich-textarea hoặc textbox không
-      logged_in  = not is_guest AND has_chatbox
-    Khi logged_in → lưu storage_state (auth.json) + marker file.
-    """
+    """Wait for stable account UI and a visible editor before saving the session."""
     if log is None: log = lambda m: logger.info(m)
 
     page = driver._page
@@ -418,31 +433,23 @@ def wait_for_gemini_login(
         log(f"   ⚠️ Không mở được Gemini: {e}")
 
     logged_in = False
+    consecutive_ready = 0
     iters = max(1, int(timeout or 300) // 3)   # 300s ÷ 3s = 100 vòng
 
     for _ in range(iters):
         try:
-            is_guest = page.evaluate('''() => {
-                const btns = Array.from(document.querySelectorAll('a, button, span'));
-                return btns.some(el => {
-                    const txt = (el.innerText || "").trim().toLowerCase();
-                    return txt === 'sign in' || txt === 'đăng nhập';
-                });
-            }''')
-            has_chatbox = (
-                page.query_selector("rich-textarea div.ql-editor")
-                or page.query_selector("div[contenteditable='true'][role='textbox']")
-            )
-            if not is_guest and has_chatbox:
+            consecutive_ready = consecutive_ready + 1 if _has_authenticated_gemini_page(page) else 0
+            if consecutive_ready >= 3:
                 logged_in = True
                 break
         except Exception:
-            pass
+            consecutive_ready = 0
         page.wait_for_timeout(3000)
 
     if logged_in:
+        if not _save_auth_state(driver._ctx, log):
+            return False
         mark_profile_ready(driver)
-        _save_auth_state(driver._ctx, log)
         log("✅ Đăng nhập hợp lệ. Phiên đã được lưu.\n")
         return True
     else:
@@ -458,8 +465,10 @@ def _save_auth_state(ctx, log=None):
         os.makedirs(os.path.dirname(auth_path), exist_ok=True)
         ctx.storage_state(path=auth_path)
         log(f"   💾 Đã lưu phiên đăng nhập → {auth_path}")
+        return True
     except Exception as e:
         log(f"   ⚠️ Không lưu được auth.json: {e}")
+        return False
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -510,6 +519,9 @@ def send_prompt_to_gemini(
             log("   ❌ Không tìm thấy ô chat. Hãy đăng nhập Gemini Web trước.")
             return ""
 
+        if not _has_authenticated_gemini_page(page):
+            log("   ❌ Chưa xác nhận tài khoản Google. Hãy đăng nhập Gemini Web trước.")
+            return ""
         mark_profile_ready(driver)
 
         try: inp.click()
