@@ -131,8 +131,7 @@ class PreviewEditorMixin:
         view.player.positionChanged.connect(self._preview_position)
         view.player.durationChanged.connect(lambda _: self._preview_position(view.player.position()))
         view.player.playbackStateChanged.connect(self._preview_play_state)
-        view.player.errorOccurred.connect(lambda error,message: self.preview_info.configure(
-            text='Không mở được preview: '+message,text_color='#ef4444'))
+        view.player.errorOccurred.connect(self._preview_media_error)
         self._preview_resume_after_drag = False
         self._preview_cues_loaded = None
         self._preview_sync_pending = False
@@ -173,6 +172,17 @@ class PreviewEditorMixin:
             else:
                 self.preview_info.configure(text='Kéo logo/sub để di chuyển; kéo góc hoặc cuộn chuột để đổi cỡ. '
                     'Khung Mờ # dùng che sub cũ; khung xanh lá là sub mới. Mờ áp dụng khi xuất.',text_color='#94a3b8')
+
+    def _preview_media_error(self, error, message):
+        detail = str(message or self.preview_canvas.player.errorString() or error)
+        self.preview_info.configure(text='Không mở được preview: '+detail, text_color='#ef4444')
+        from PySide6.QtCore import QCoreApplication
+        source = self.preview_canvas.player.source().toLocalFile()
+        logger = getattr(self, '_thread_safe_log', None)
+        if callable(logger):
+            logger(f"❌ [PREVIEW] {error}: {detail}\n"
+                   f"   Video: {source}\n"
+                   f"   Qt plugins: {QCoreApplication.libraryPaths()}\n")
 
     def _load_native_preview(self,path):
         if not path or not os.path.isfile(path):

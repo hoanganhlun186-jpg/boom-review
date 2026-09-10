@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.23"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.24"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
@@ -9,11 +9,18 @@ import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 if "__compiled__" in dir() or getattr(sys, "frozen", False):
     # Nuitka: sys.executable = đường dẫn đến BoomReview.exe trong thư mục dist
     _app_dir = os.path.dirname(os.path.abspath(sys.executable))
-    _qt_plugin_path = os.path.join(_app_dir, "PySide6", "plugins")
-    if os.path.isdir(_qt_plugin_path):
-        # Qt6 dùng QT_PLUGIN_PATH để tìm tất cả plugins (multimedia, platforms, ...)
-        os.environ["QT_PLUGIN_PATH"] = _qt_plugin_path
-        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(_qt_plugin_path, "platforms")
+    _qt_plugin_paths = [
+        os.path.join(_app_dir, "PySide6", name)
+        for name in ("qt-plugins", "plugins")
+        if os.path.isdir(os.path.join(_app_dir, "PySide6", name))
+    ]
+    if _qt_plugin_paths:
+        os.environ["QT_PLUGIN_PATH"] = os.pathsep.join(_qt_plugin_paths)
+        for _plugin_root in _qt_plugin_paths:
+            _platform_path = os.path.join(_plugin_root, "platforms")
+            if os.path.isfile(os.path.join(_platform_path, "qwindows.dll")):
+                os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _platform_path
+                break
 # ─────────────────────────────────────────────────────────────────────────────
 import re, shutil, io, math, unicodedata, tempfile
 
