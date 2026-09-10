@@ -98,6 +98,7 @@ jobs:
           --include-package=PySide6.QtMultimedia `
           --include-package=PySide6.QtMultimediaWidgets `
           --enable-plugin=pyside6 `
+          --include-qt-plugins=multimedia `
           --enable-plugin=numpy `
           --enable-plugin=tk-inter `
           --assume-yes-for-downloads `
@@ -130,8 +131,15 @@ jobs:
         for plugin_name in ['multimedia', 'mediaservice', 'playlistformats']:
             src_plugin = qt_root / 'plugins' / plugin_name
             if src_plugin.exists():
-                shutil.copytree(src_plugin, dist / 'PySide6' / 'plugins' / plugin_name, dirs_exist_ok=True)
+                shutil.copytree(src_plugin, dist / 'PySide6' / 'qt-plugins' / plugin_name, dirs_exist_ok=True)
                 print(f'Copied Qt plugin: {plugin_name}')
+
+        # Fail before publishing if the playback backend is outside Nuitka's search path.
+        for relative in ['PySide6/qt-plugins/platforms/qwindows.dll',
+                         'PySide6/qt-plugins/multimedia/ffmpegmediaplugin.dll']:
+            required = dist / relative
+            if not required.is_file() or required.stat().st_size == 0:
+                raise FileNotFoundError(f'Missing packaged Qt plugin: {required}')
 
         # certifi CA bundle
         shutil.copy2(certifi.where(), dist / 'cacert.pem')

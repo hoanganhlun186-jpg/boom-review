@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.24"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.26"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
@@ -39,6 +39,12 @@ except ImportError:
     print("⚠️ pyperclip not installed. Clipboard features disabled.")
 
 from PySide6.QtCore  import Qt, QTimer, Signal, QThread, QObject, QSize, QRectF
+# Nuitka resets libraryPaths during the QtCore import, overriding QT_PLUGIN_PATH.
+# Register bundled paths again before any multimedia player is constructed.
+if "__compiled__" in dir() or getattr(sys, "frozen", False):
+    from PySide6.QtCore import QCoreApplication
+    for _plugin_root in reversed(_qt_plugin_paths):
+        QCoreApplication.addLibraryPath(_plugin_root)
 from PySide6.QtGui   import (QPixmap, QImage, QColor, QFont as QFontQt,
                               QPainter, QCursor, QIcon, QClipboard, QTextCursor)
 from PySide6.QtWidgets import (
