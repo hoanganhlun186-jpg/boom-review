@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.26"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.27"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
@@ -666,6 +666,7 @@ class App(PreviewEditorMixin, QMainWindow):
         # ── Build UI ─────────────────────────────────────────────────────────
         self._build_ui()
         self._load_saved_config()
+        self._connect_api_autosave()
         self.update_preview()
         self.after(300, self._refresh_gemini_web_login_status)
 
@@ -836,6 +837,17 @@ class App(PreviewEditorMixin, QMainWindow):
                                                  fg_color="#0f766e", command=self._preview_voice_sample)
         vr2l.addWidget(self.btn_preview_voice)
         right_lay.addWidget(voice_row2)
+
+        pekka_row = QWidget()
+        pekka_layout = QHBoxLayout(pekka_row)
+        pekka_layout.setContentsMargins(2, 2, 2, 2)
+        self.pekka_api_key = QLineEdit()
+        self.pekka_api_key.setPlaceholderText("API key Pekka (giọng trả phí)")
+        self.pekka_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        pekka_layout.addWidget(self.pekka_api_key)
+        self.btn_pekka_voices = QPushButton_CTK(text="Tải giọng Pekka", command=self._load_pekka_voices)
+        pekka_layout.addWidget(self.btn_pekka_voices)
+        right_lay.addWidget(pekka_row)
 
         # Play output
         self.btn_play_output = QPushButton_CTK(text="▶ Xem thử video output",
@@ -1513,6 +1525,13 @@ class App(PreviewEditorMixin, QMainWindow):
                 self.api_keys_file.insert(0, cfg["gemini_keys_file"])
             if cfg.get("openrouter_api_key"):
                 self.openrouter_api_key.insert(0, cfg["openrouter_api_key"])
+            self.pekka_api_key.setText(str(cfg.get("pekka_api_key", "") or ""))
+            self._pekka_voices = cfg.get("pekka_voices") or []
+            self.tts_language.set(cfg.get("tts_language", "Tiếng Việt"))
+            self.on_tts_language_change(self.tts_language.get())
+            saved_voice = cfg.get("tts_voice", "")
+            if saved_voice in self.get_voice_options(self.tts_language.get()):
+                self.voice_choice.set(saved_voice)
             if cfg.get("review_style") and hasattr(self, "review_style"):
                 self._set_review_style(cfg["review_style"], save=False)
             if hasattr(self, "capcut_srt_mode"):
@@ -2692,8 +2711,18 @@ class App(PreviewEditorMixin, QMainWindow):
             self.update_preview_delayed()
 
     def get_voice_options(self, language_label):
+        from engine.pekka_tts import voice_options, voice_language_matches
+        from engine.pekka_samples import bundled_voices
+        language = "en" if language_label == "English" else "vi"
+        pekka = voice_options(language)
+        known_ids = {label.rsplit("pekka:", 1)[1] for label in pekka}
+        for item in bundled_voices() + getattr(self, "_pekka_voices", []):
+            vid = str(item.get("id", ""))
+            if re.fullmatch(r"[A-Za-z0-9_-]+", vid) and vid not in known_ids and voice_language_matches(item, language):
+                pekka.extend(voice_options(language, [(item.get("name") or vid, vid)]))
+                known_ids.add(vid)
         if language_label == "English":
-            return ["en-US-AriaNeural", "en-US-GuyNeural", "en-GB-LibbyNeural"]
+            return ["en-US-AriaNeural", "en-US-GuyNeural", "en-GB-LibbyNeural"] + pekka
         # Danh sách giọng Việt: edge-tts + Piper offline
         base = [
             "Review nữ - vi-VN-HoaiMyNeural",
@@ -2712,7 +2741,33 @@ class App(PreviewEditorMixin, QMainWindow):
                     base.append(label)
         except Exception:
             pass
-        return base
+        return base + pekka
+
+    def _load_pekka_voices(self):
+        from engine.pekka_tts import fetch_voices
+        key = self.pekka_api_key.text().strip()
+        if not key:
+            self._show_error("Bạn chưa nhập API key Pekka.")
+            return
+        self.btn_pekka_voices.configure(state="disabled", text="Đang tải...")
+
+        def worker():
+            try:
+                voices = fetch_voices(key)
+                def apply():
+                    self._pekka_voices = voices
+                    self.save_config({"pekka_voices": voices})
+                    self.on_tts_language_change(self.tts_language.get())
+                    self.btn_pekka_voices.configure(state="normal", text="Tải giọng Pekka")
+                    self._thread_safe_log(f"✓ Đã tải {len(voices)} giọng Pekka; lọc theo ngôn ngữ đang chọn.\n")
+                self.after(0, apply)
+            except Exception as exc:
+                message = str(exc)
+                def fail():
+                    self.btn_pekka_voices.configure(state="normal", text="Tải giọng Pekka")
+                    self._show_error(message)
+                self.after(0, fail)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _is_voice_id(self, text):
         return bool(re.fullmatch(r"[a-z]{2}-[A-Z]{2}-[A-Za-z0-9]+Neural", (text or "").strip()))
@@ -2725,6 +2780,9 @@ class App(PreviewEditorMixin, QMainWindow):
 
     def _resolve_voice_id(self, voice_label, language_label=None):
         voice_label = (voice_label or "").strip()
+        pekka_match = re.search(r"(?:^|\s)(pekka:[A-Za-z0-9_-]+)$", voice_label)
+        if pekka_match:
+            return pekka_match.group(1)
         if self._is_voice_id(voice_label):
             return voice_label
         # Nhận dạng Piper offline: "🎙 Ngọc Huyền (Offline) - piper:ngoc_huyen"
@@ -2756,13 +2814,21 @@ class App(PreviewEditorMixin, QMainWindow):
         voice_label = self.voice_choice.get() if hasattr(self, "voice_choice") else ""
         lang_label  = self.tts_language.get() if hasattr(self, "tts_language") else "Tiếng Việt"
         voice_id    = self._resolve_voice_id(voice_label, lang_label)
+        from engine.pekka_samples import bundled_sample_path
+        bundled_sample = bundled_sample_path(voice_id)
+        pekka_key = self.pekka_api_key.text().strip()
+        if voice_id.startswith("pekka:") and not bundled_sample and not pekka_key:
+            self._show_error("Bạn chưa nhập API key Pekka.")
+            return
 
         # Luôn dùng câu mẫu tiếng Việt để người dùng nghe và chọn giọng
         sample_text = "Xin chào! Đây là giọng đọc mẫu của ứng dụng BOOM Review. Giọng này sẽ được dùng để lồng tiếng cho video recap."
+        if lang_label == "English":
+            sample_text = "Hello! This is a sample of the narration voice for your movie recap."
 
         # Disable nút trong lúc phát để tránh spam
         if hasattr(self, "btn_preview_voice"):
-            self.btn_preview_voice.configure(state="disabled", text="⏳ Đang tạo...")
+            self.btn_preview_voice.configure(state="disabled", text="▶ Đang phát..." if bundled_sample else "⏳ Đang tạo...")
 
         def _do_preview():
             import tempfile, os
@@ -2772,7 +2838,13 @@ class App(PreviewEditorMixin, QMainWindow):
             err_msg = ""
             try:
                 from engine.piper_tts import is_piper_voice, synthesize_piper
-                if is_piper_voice(voice_id):
+                if bundled_sample:
+                    play_path = bundled_sample
+                elif voice_id.startswith("pekka:"):
+                    from engine.pekka_tts import synthesize_pekka
+                    synthesize_pekka(sample_text, tmp_mp3, voice_id, api_key=pekka_key)
+                    play_path = tmp_mp3
+                elif is_piper_voice(voice_id):
                     # Piper offline → WAV
                     synthesize_piper(sample_text, tmp_path, voice=voice_id, speed=1.0)
                     play_path = tmp_path
@@ -2872,9 +2944,12 @@ class App(PreviewEditorMixin, QMainWindow):
             return
         voices = self.get_voice_options(value)
         current = self.voice_choice.get() if hasattr(self, "voice_choice") else ""
+        blocked = self.voice_choice.blockSignals(True)
         self.voice_choice.configure(values=voices)
-        if current not in voices:
-            self.voice_choice.set(voices[0])
+        self.voice_choice.set(current if current in voices else voices[0])
+        self.voice_choice.blockSignals(blocked)
+        if not blocked:
+            self.voice_choice.currentTextChanged.emit(self.voice_choice.get())
 
     def on_cut_mode_change(self, value):
         preset = getattr(self, "cut_mode_presets", {}).get(value)
@@ -4686,7 +4761,7 @@ class App(PreviewEditorMixin, QMainWindow):
                 tts_language_label = self.tts_language.get() if hasattr(self, 'tts_language') else "Tiếng Việt"
                 tts_language = "Vietnamese" if self._is_vietnamese_language(tts_language_label) else "English"
                 selected_voice = self._resolve_voice_id(self.voice_choice.get(), tts_language_label) if hasattr(self, 'voice_choice') else "vi-VN-HoaiMyNeural"
-                if self._is_vietnamese_language(tts_language_label) and not selected_voice.startswith("vi-") and not selected_voice.startswith("piper:"):
+                if self._is_vietnamese_language(tts_language_label) and not selected_voice.startswith(("vi-", "piper:", "pekka:")):
                     selected_voice = "vi-VN-HoaiMyNeural"
                 script_type = self.script_type.get() if hasattr(self, 'script_type') else "Mô-đun (Intro+Body+Outro)"
                 prebuilt_review_script = self._get_review_script_text()
@@ -4761,7 +4836,7 @@ class App(PreviewEditorMixin, QMainWindow):
                     ai.text_to_speech(script, tts_path, voice=selected_voice, rate=voice_rate)
                 )
                 self.log.insert("end", f"✓ Giọng nói hoàn thành: {chosen_voice}\n")
-                if "vi-" in chosen_voice:
+                if "vi-" in chosen_voice or (chosen_voice.startswith(("pekka:", "piper:")) and self._is_vietnamese_language(tts_language_label)):
                     self.log.insert("end", "  → Tiếng Việt ✓\n")
                 else:
                     self.log.insert("end", f"  ⚠️ Không phải tiếng Việt, hệ thống dùng: {chosen_voice}\n")
@@ -5841,7 +5916,7 @@ Tạo JSON ngay."""
             tts_language_label = self.tts_language.get() if hasattr(self, 'tts_language') else "Tiếng Việt"
             tts_language = "Vietnamese" if self._is_vietnamese_language(tts_language_label) else "English"
             selected_voice = self._resolve_voice_id(self.voice_choice.get(), tts_language_label) if hasattr(self, 'voice_choice') else "vi-VN-HoaiMyNeural"
-            if self._is_vietnamese_language(tts_language_label) and not selected_voice.startswith("vi-") and not selected_voice.startswith("piper:"):
+            if self._is_vietnamese_language(tts_language_label) and not selected_voice.startswith(("vi-", "piper:", "pekka:")):
                 selected_voice = "vi-VN-HoaiMyNeural"
             character_focus = self.movie_name.get().strip()
             
@@ -6338,6 +6413,24 @@ Tạo JSON ngay."""
         except Exception as e:
             self.log.insert("end", f"❌ Lỗi: {str(e)}\n")
             self.log.see("end")
+
+    def _connect_api_autosave(self):
+        # Connect after restoring settings so initialization cannot erase saved keys.
+        for field, key in ((self.api_key, 'gemini_api_key'),
+                           (self.api_keys_file, 'gemini_keys_file'),
+                           (self.openrouter_api_key, 'openrouter_api_key'),
+                           (self.pekka_api_key, 'pekka_api_key')):
+            field.textChanged.connect(
+                lambda value, config_key=key: self._save_api_setting(config_key, value))
+        self.voice_choice.currentTextChanged.connect(
+            lambda value: self.save_config({"tts_voice": value}))
+        self.tts_language.currentTextChanged.connect(
+            lambda value: self.save_config({"tts_language": value}))
+
+    def _save_api_setting(self, key, value):
+        # Save only the changed field; never log credential values.
+        if not self.save_config({key: value.strip()}):
+            self._thread_safe_log('⚠️ Không lưu được cài đặt API. Kiểm tra quyền ghi thư mục cấu hình.\n')
 
     def load_config(self):
         if not hasattr(self, "config_manager") or self.config_manager is None:

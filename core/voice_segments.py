@@ -267,6 +267,14 @@ class VoiceSegmentsGenerator:
         
         # Sanitize text for TTS engine
         clean_text = self._sanitize_tts_text(text)
+
+        if voice.startswith("pekka:"):
+            from engine.pekka_tts import synthesize_pekka
+            await asyncio.to_thread(synthesize_pekka, clean_text, output_path, voice, rate)
+            duration = _probe_audio_duration(output_path)
+            if duration < 0.1:
+                raise RuntimeError("Không đo được thời lượng voice Pekka.")
+            return duration
         
         # If sanitized text becomes empty, pad it
         if len(clean_text) < 2:

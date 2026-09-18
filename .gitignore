@@ -26,9 +26,11 @@ capcut_device.json
 
 # File xuất / exports
 exports/
+outputs/
 
 # File test audio tạm
 *.mp3
+!assets/pekka_samples/*.mp3
 temp_*.mp3
 test_*.mp3
 

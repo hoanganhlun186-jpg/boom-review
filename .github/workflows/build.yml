@@ -116,6 +116,18 @@ jobs:
         # assets (icon, font, ...)
         shutil.copytree('assets', dist / 'assets', dirs_exist_ok=True)
 
+        # Ship every approved Pekka preview so customers can listen without API calls.
+        import json
+        preview_dir = dist / 'assets' / 'pekka_samples'
+        previews = json.loads((preview_dir / 'manifest.json').read_text(encoding='utf-8'))
+        if len(previews) != 85 or len({item['id'] for item in previews}) != 85:
+            raise ValueError('Expected 85 unique Pekka voice previews')
+        for item in previews:
+            audio = preview_dir / item['file']
+            if not audio.is_file() or audio.stat().st_size < 100:
+                raise FileNotFoundError(f'Missing Pekka preview: {audio}')
+        print('Verified 85 bundled Pekka voice previews')
+
         # Qt multimedia plugins (cần cho preview video)
         import PySide6
         qt_root = Path(PySide6.__file__).parent

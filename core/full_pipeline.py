@@ -4952,6 +4952,7 @@ class FullPipeline:
             continuous_default = "1" if self._recap2_beat_mode_enabled() else "0"
             timing_policy = {
                 "version": 8,
+                "voice_id": self.voice,
                 "mode": "recap2_scene_anchored" if self._recap2_beat_mode_enabled() else "scene_pinned",
                 "min_voice_speed": float(os.environ.get("AUTORECAP_MIN_VOICE_SPEED", "1.0") or "1.0"),
                 "max_voice_speed": float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5"),
@@ -4981,6 +4982,8 @@ class FullPipeline:
                 source_sidecar = str(source_audio) + ".timing.json"
                 output_sidecar = str(output_audio) + ".timing.json"
                 if not os.path.exists(source_sidecar):
+                    if os.path.exists(output_sidecar):
+                        os.unlink(output_sidecar)
                     return
                 try:
                     with open(source_sidecar, "r", encoding="utf-8") as timing_file:

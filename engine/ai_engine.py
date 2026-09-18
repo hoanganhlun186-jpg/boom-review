@@ -3356,6 +3356,34 @@ Trả về DUY NHẤT JSON hợp lệ với 4 khóa:
         """
         # ── Piper TTS offline ────────────────────────────────────────────────
         v_str = str(voice or "").strip()
+        if v_str.startswith("pekka:"):
+            import asyncio
+            from engine.pekka_tts import synthesize_pekka, get_api_key
+            key = get_api_key()
+            segments = self._parse_paced_segments(text, rate)
+            if not segments:
+                raise ValueError("Nội dung tạo voice Pekka đang trống.")
+            output_path = os.path.abspath(output_path)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="pekka_paced_", dir=os.path.dirname(output_path)) as folder:
+                parts = []
+                for index, (segment_text, segment_rate) in enumerate(segments):
+                    part = os.path.join(folder, f"part_{index}" + os.path.splitext(output_path)[1])
+                    await asyncio.to_thread(synthesize_pekka, segment_text, part, v_str, segment_rate, key)
+                    parts.append(part)
+                    if progress_callback:
+                        progress_callback(int((index + 1) * 100 / len(segments)), index + 1, len(segments))
+                staged = os.path.join(folder, "result" + os.path.splitext(output_path)[1])
+                if len(parts) == 1:
+                    os.replace(parts[0], staged)
+                else:
+                    await asyncio.to_thread(self._concat_audio_files, parts, staged)
+                os.replace(staged, output_path)
+            # Pekka does not return word boundaries. Do not reuse Edge timing.
+            sidecar = output_path + ".timing.json"
+            if os.path.exists(sidecar):
+                os.unlink(sidecar)
+            return v_str
         try:
             from engine.piper_tts import is_piper_voice, synthesize_piper
             if is_piper_voice(v_str):
