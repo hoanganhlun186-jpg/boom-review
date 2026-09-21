@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.28"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.29"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
@@ -577,8 +577,9 @@ class App(PreviewEditorMixin, QMainWindow):
             except Exception:
                 continue
 
-    def __init__(self):
+    def __init__(self, shared_only=False):
         super().__init__()
+        self._shared_only = shared_only
         self._ui_call.connect(lambda fn: fn(), Qt.QueuedConnection)
 
         try:
@@ -992,6 +993,14 @@ class App(PreviewEditorMixin, QMainWindow):
         resume_row.layout().addWidget(self.btn_resume_pipeline, 1)
         resume_row.layout().addWidget(self.btn_open_script_editor, 1)
         self.container._add(resume_row)
+        batch_row = self._make_row()
+        self.btn_batch = QPushButton_CTK(text="📚 Chọn video chạy hàng loạt", command=self._start_batch)
+        self.btn_batch_stop = QPushButton_CTK(text="Dừng sau video hiện tại", command=self._stop_batch)
+        batch_row.layout().addWidget(self.btn_batch)
+        batch_row.layout().addWidget(self.btn_batch_stop)
+        self.container._add(batch_row)
+        self._batch_status = QLabel('Hàng đợi trống')
+        self.container._add(self._batch_status)
 
         # Hidden pipeline button (kept for internal refs)
         self.btn_full_pipeline = QPushButton_CTK(text="🚀 CHẠY FULL PIPELINE",
@@ -6374,7 +6383,13 @@ Tạo JSON ngay."""
     def load_config(self):
         if not hasattr(self, "config_manager") or self.config_manager is None:
             self.config_manager = ConfigManager()
-        return self.config_manager.load()
+        data = self.config_manager.load()
+        if getattr(self, '_shared_only', False):
+            keys = {'gemini_api_key', 'gemini_keys_file', 'openrouter_api_key',
+                    'pekka_api_key', 'pekka_voices', 'tts_language', 'tts_voice',
+                    'review_style'}
+            return {key: value for key, value in data.items() if key in keys}
+        return data
 
     def save_config(self, data: dict):
         if not hasattr(self, "config_manager") or self.config_manager is None:
@@ -6728,7 +6743,46 @@ Tạo JSON ngay."""
 
         self._full_pipeline_worker(video_path, output_dir)
 
-    def _full_pipeline_worker(self, video_path: str, output_dir: str, resume_saved=False):
+    def _stop_batch(self):
+        if getattr(self, '_batch_running', False):
+            self._batch_stop.set()
+            self._batch_status.setText('Sẽ dừng sau video hiện tại')
+
+    def _start_batch(self):
+        if getattr(self, '_batch_running', False) or not self.btn_run.isEnabled():
+            QMessageBox.information(self, 'Đang chạy', 'Chờ tác vụ hiện tại hoàn tất trước khi chạy hàng loạt.')
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, 'Chọn các video theo thứ tự tập', '', 'Video (*.mp4 *.mkv *.mov *.avi *.webm)')
+        if not paths:
+            return
+        paths = sorted(set(paths), key=lambda p: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', p)])
+        jobs = [(path, self._ensure_video_output_dir(path, force_new=True, update_entries=False)) for path in paths]
+        self._batch_running = True
+        self._batch_stop = threading.Event()
+        for button in (self.btn_batch, self.btn_run, self.btn_resume_pipeline, self.btn_cut_video):
+            button.setEnabled(False)
+        def worker():
+            results = []
+            for index, (video, output) in enumerate(jobs, 1):
+                if self._batch_stop.is_set():
+                    break
+                label = f'{index}/{len(jobs)}: {os.path.basename(video)}'
+                self.after(0, lambda text=label: self._batch_status.setText(text))
+                self._thread_safe_log(f'\n📚 Hàng đợi {label}\n')
+                ok = self._full_pipeline_worker(video, output, batch_mode=True)
+                results.append({'video': video, 'output': output, 'success': bool(ok)})
+            def finish_batch():
+                self._batch_running = False
+                for button in (self.btn_batch, self.btn_run, self.btn_resume_pipeline, self.btn_cut_video):
+                    button.setEnabled(True)
+                self.btn_full_pipeline.setEnabled(True)
+                good = sum(item['success'] for item in results)
+                self._batch_status.setText(f'Đã xử lý {len(results)}/{len(jobs)} — thành công {good}, lỗi {len(results)-good}')
+                self._thread_safe_log('\n'.join(('✅ ' if item['success'] else '❌ ') + item['video'] + ' → ' + item['output'] for item in results) + '\n')
+            self.after(0, finish_batch)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _full_pipeline_worker(self, video_path: str, output_dir: str, resume_saved=False, batch_mode=False, tab_queue=False):
         """Worker thread cho Full Pipeline."""
         # Disable run button to prevent double execution
         self.after(0, lambda: self.btn_run.configure(
@@ -6770,6 +6824,8 @@ Tạo JSON ngay."""
         try:
             # Collect settings from UI
             movie_title       = self.movie_name.get().strip() if hasattr(self, "movie_name") else ""
+            if batch_mode:
+                movie_title = os.path.splitext(os.path.basename(video_path))[0]
             movie_description = self._get_textbox_text(self.movie_description) if hasattr(self, "movie_description") else ""
             review_style      = self._set_review_style(self._selected_review_style_key(), save=True)
             voice_id          = self._voice_id(self.voice_choice.get()) if hasattr(self, "voice_choice") else "vi-VN-HoaiMyNeural"
@@ -6790,6 +6846,17 @@ Tạo JSON ngay."""
             # Also check the srt_path entry field
             if not source_srt and hasattr(self, "srt_path"):
                 source_srt = self.srt_path.get().strip()
+            if batch_mode or (tab_queue and not source_srt):
+                # Never reuse the previous episode's subtitle entry.
+                video_stem = os.path.splitext(video_path)[0]
+                source_srt = next((video_stem + suffix for suffix in
+                                   ('_vi.srt', '.vi.srt', '.srt')
+                                   if os.path.isfile(video_stem + suffix)
+                                   and os.path.getsize(video_stem + suffix) > 0), '')
+                if source_srt:
+                    log(f'   📝 SRT tự nhận cho {os.path.basename(video_path)}: {source_srt}')
+                else:
+                    log(f'   ℹ️ Không có SRT đi kèm {os.path.basename(video_path)}; pipeline sẽ tạo phụ đề nguồn.')
             if source_srt and os.path.exists(source_srt):
                 source_srt = self._ensure_vietnamese_source_srt(source_srt) or source_srt
             smart = getattr(self, "_fp_smart_cut", True)
@@ -6907,6 +6974,9 @@ Tạo JSON ngay."""
             )
 
             outputs = pipeline.get_outputs()
+            if batch_mode or tab_queue:
+                log(f'{"✅" if success else "❌"} Hàng loạt: {os.path.basename(video_path)} → {output_dir}')
+                return bool(success)
 
             def finish():
                 # Re-enable both buttons
@@ -6991,6 +7061,8 @@ Tạo JSON ngay."""
             import traceback
             err = traceback.format_exc()
             self._thread_safe_log(f"❌ Full Pipeline exception: {str(e)}\n{err}\n")
+            if batch_mode or tab_queue:
+                return False
             self.after(0, lambda: self.btn_full_pipeline.configure(
                 state="normal", text="🚀 CHẠY FULL PIPELINE (10 BƯỚC)"))
 
@@ -7004,6 +7076,100 @@ Tạo JSON ngay."""
         except Exception:
             pass
 
+
+class ProjectTabs(QMainWindow):
+    """Independent project widgets, processed sequentially by one worker."""
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('BOOM Review — Các tập')
+        self.resize(1500, 1000)
+        self.setStyleSheet(DARK_QSS)
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+        self.running = False
+        self.stop_requested = threading.Event()
+        bar = self.addToolBar('Các tập')
+        bar.addAction('＋ Thêm tab', self.add_project)
+        bar.addAction('▶ Chạy các tab lần lượt', self.run_projects)
+        bar.addAction('Dừng sau tab hiện tại', self.stop_requested.set)
+        self.add_project(first=True)
+
+    def add_project(self, first=False):
+        if self.running:
+            return
+        previous = self.tabs.currentWidget()
+        if previous is not None:
+            previous.save_config({
+                'gemini_api_key': previous.api_key.get(),
+                'gemini_keys_file': previous.api_keys_file.get(),
+                'openrouter_api_key': previous.openrouter_api_key.get(),
+                'pekka_api_key': previous.pekka_api_key.text(),
+                'tts_language': previous.tts_language.get(),
+                'tts_voice': previous.voice_choice.get(),
+            })
+        project = App(shared_only=not first)
+        project.setWindowFlags(Qt.Widget)
+        self.tabs.addTab(project, f'Tập {self.tabs.count()+1}')
+        self.tabs.setCurrentWidget(project)
+
+    def run_projects(self):
+        if self.running:
+            return
+        projects = [self.tabs.widget(i) for i in range(self.tabs.count())]
+        if any(not p.btn_run.isEnabled() or getattr(p, '_batch_running', False) for p in projects):
+            QMessageBox.information(self, 'Đang chạy', 'Chờ tác vụ hiện tại xong trước khi chạy các tab.')
+            return
+        jobs = []
+        for index, project in enumerate(projects):
+            video = project.video_path.get().strip()
+            if not video:
+                continue
+            if not os.path.isfile(video):
+                QMessageBox.warning(self, 'Thiếu video', f'Tab {index+1}: video không tồn tại.')
+                return
+            output = project._ensure_video_output_dir(video, force_new=True, update_entries=True)
+            jobs.append((index, project, video, output))
+        if not jobs:
+            QMessageBox.information(self, 'Chưa có video', 'Chọn video trong ít nhất một tab.')
+            return
+        # Credentials and default voice are shared; project/render fields stay local.
+        shared = self.tabs.currentWidget()
+        for project in projects:
+            if project is shared:
+                continue
+            for field in ('api_key', 'api_keys_file', 'openrouter_api_key', 'pekka_api_key'):
+                getattr(project, field).setText(getattr(shared, field).text())
+            project._pekka_voices = list(getattr(shared, '_pekka_voices', []))
+            project.tts_language.set(shared.tts_language.get())
+            project.on_tts_language_change(shared.tts_language.get())
+            project.voice_choice.set(shared.voice_choice.get())
+        self.running = True
+        self.stop_requested.clear()
+        for project in projects:
+            project.setEnabled(False)
+        def worker():
+            for index, project, video, output in jobs:
+                if self.stop_requested.is_set():
+                    break
+                project.after(0, lambda i=index: self.tabs.setCurrentIndex(i))
+                project._thread_safe_log(f'▶ Hàng đợi: bắt đầu tab {index+1}\n')
+                ok = project._full_pipeline_worker(video, output, tab_queue=True)
+                project.after(0, lambda i=index, result=ok: self.tabs.setTabText(i, f'Tập {i+1} — {"Xong" if result else "Lỗi"}'))
+            def finish():
+                self.running = False
+                for project in projects:
+                    project.setEnabled(True)
+                    project.btn_run.setEnabled(True)
+                    project.btn_full_pipeline.setEnabled(True)
+            projects[0].after(0, finish)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def closeEvent(self, event):
+        if self.running:
+            QMessageBox.information(self, 'Đang chạy', 'Bấm Dừng sau tab hiện tại và chờ xử lý xong trước khi đóng.')
+            event.ignore()
+        else:
+            super().closeEvent(event)
 
 def run_app():
     qapp = QApplication.instance() or QApplication(sys.argv)
@@ -7029,7 +7195,7 @@ def run_app():
         sys.exit(1)
     # ─────────────────────────────────────────────────────────────────────────
 
-    app = App()
+    app = ProjectTabs()
     app.show()
 
     # ── Auto-update: kiểm tra bản mới sau 3 giây ─────────────────────────────
