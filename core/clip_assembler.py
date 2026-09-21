@@ -859,11 +859,13 @@ def assemble_clip_based_video(
         vs = voice_map.get(bid) or {}
         audio_path = vs.get("audio_path", "")
         if not audio_path or not os.path.exists(audio_path):
-            continue
+            log(f"❌ Thiếu voice block {bid}; không render thiếu nội dung.")
+            return False
         dur = _probe_duration(audio_path, ffprobe_bin)
         if dur <= 0:
-            dur = _estimate_tts_duration(block.get("text", ""))
-        voice_duration_map[bid] = max(MIN_BLOCK_DURATION, dur)
+            log(f"❌ Không đo được thời lượng voice block {bid}.")
+            return False
+        voice_duration_map[bid] = dur
 
     total_voice_duration = sum(voice_duration_map.values())
     if target_duration_seconds > 0 and total_voice_duration > 0:
@@ -898,14 +900,13 @@ def assemble_clip_based_video(
         vs = voice_map.get(bid) or {}
         audio_path = vs.get("audio_path", "")
         if not audio_path or not os.path.exists(audio_path):
-            log(f"   ⚠️ Block {bid}: không có voice audio → skip")
-            continue
+            log(f"❌ Thiếu voice block {bid}; không render thiếu nội dung.")
+            return False
 
         # Đo actual TTS duration
         tts_dur = voice_duration_map.get(bid) or _probe_duration(audio_path, ffprobe_bin)
         if tts_dur <= 0:
-            tts_dur = _estimate_tts_duration(block.get("text", ""))
-        tts_dur = max(MIN_BLOCK_DURATION, tts_dur)
+            return False
 
         # Lấy scene_ids
         rb = dict(rb_map.get(bid) or {})
@@ -934,84 +935,15 @@ def assemble_clip_based_video(
             try: scene_ids = [int(rb.get("scene_id"))]
             except: scene_ids = []
 
-        # Ưu tiên các source block nhỏ theo timeline. review_clip thường là một
-        # khoảng rất rộng chứa nhiều cảnh; dùng nó trước sẽ khiến semantic
-        # anchor nằm giữa clip và voice đọc trước hình nhiều giây.
-        candidates = collect_candidate_clips(
-            scene_ids,
-            render_blocks,
-            scenes,
-            tts_dur,
-            min_start=source_timeline_cursor,  # dùng source cursor thay vì final cursor
-            used_ranges=used_ranges,
-            source_block_ids=source_block_ids,
-        )
-
-        # review_clip là fallback khi package cũ chưa có source_block_ids.
-        review_clip = block.get("review_clip") if isinstance(block.get("review_clip"), dict) else {}
+        from core.block_source_bounds import owned_source_ranges, bounded_candidates
         try:
-            rc_start = float(review_clip.get("start") if review_clip.get("start") is not None else -1)
-            rc_end = float(review_clip.get("end") if review_clip.get("end") is not None else -1)
-        except Exception:
-            rc_start, rc_end = -1.0, -1.0
-        if not candidates and rc_end > rc_start + 0.25 and not _looks_like_branding(block):
-            candidates = [(max(float(source_timeline_cursor or 0.0), rc_start), rc_end, float(rb.get("smart_score") or rb.get("cut_score") or 0.0))]
-
-        # A review_clip can be shorter than its natural narration. Fill the
-        # remainder with following source scenes instead of asking FFmpeg to
-        # hold the final frame until the audio finishes.
-        candidate_seconds = sum(max(0.0, end - start) for start, end, _ in candidates)
-        if candidates and candidate_seconds < tts_dur - TRIM_TOLERANCE:
-            extra = collect_candidate_clips(
-                scene_ids,
-                render_blocks,
-                scenes,
-                tts_dur - candidate_seconds,
-                min_start=max(float(source_timeline_cursor or 0.0), max(end for _start, end, _score in candidates)),
-                used_ranges=used_ranges + [(start, end) for start, end, _score in candidates],
-                source_block_ids=source_block_ids,
-            )
-            candidates.extend(extra)
-
-        # Package rất cũ có thể chưa có cả source_block_ids lẫn review_clip.
-        if not candidates:
-            candidates = collect_candidate_clips(
-                scene_ids, render_blocks, scenes, tts_dur,
-                min_start=source_timeline_cursor,
-                used_ranges=used_ranges,
-                source_block_ids=source_block_ids,
-            )
-        if not candidates:
-            # RECAP2 flow: AI_FULL chạy trước CLIP_FIND, nên một số chapter beat
-            # có thể không còn scene_ids rõ ràng. Khi đó dùng source range của
-            # chính render_block để cắt đúng cảnh thay vì fallback mù theo final time.
-            try:
-                source_start = float(
-                    rb.get("original_start")
-                    or rb.get("src_start")
-                    or rb.get("start_s")
-                    or rb.get("start_in_final_video")
-                    or source_timeline_cursor
-                )
-                source_end = float(
-                    rb.get("original_end")
-                    or rb.get("src_end")
-                    or (source_start + float(rb.get("duration") or tts_dur))
-                )
-            except Exception:
-                source_start, source_end = source_timeline_cursor, source_timeline_cursor + tts_dur
-            if _looks_like_branding(block) or _looks_like_branding(rb):
-                source_start = float(source_timeline_cursor or 0.0)
-                source_end = source_start + tts_dur
-            source_start = max(float(source_timeline_cursor or 0.0), source_start)
-            if source_end > source_start + 0.25:
-                candidates = [(source_start, source_end, float(rb.get("smart_score") or rb.get("cut_score") or 0.0))]
-                log(f"   ℹ️ Block {bid}: dùng source range của beat ({source_start:.1f}-{source_end:.1f}s)")
-            else:
-                log(f"   ⚠️ Block {bid}: không có candidate clips")
-                s = max(source_timeline_cursor, float(rb.get("original_start") or rb.get("start_in_final_video") or 0))
-                e = s + tts_dur
-                candidates = [(s, e, 0.0)]
+            allowed = owned_source_ranges(block, render_blocks, scenes)
+            source_end = _probe_duration(source_video, ffprobe_bin)
+            allowed = [(a, min(b, source_end)) for a,b in allowed if a < source_end]
+            # Fixed source bounds; voice is sped up before concat/SRT.
+            candidates = bounded_candidates(allowed, tts_dur, source_timeline_cursor, used_ranges)
+        except ValueError as error:
+            raise ValueError(f"Block {bid}: {error}") from error
 
         voice_timeline_candidates, anchored_units = _plan_clips_on_tts_timeline(
             candidates,
@@ -1029,53 +961,12 @@ def assemble_clip_based_video(
                 f"cảnh bắt đầu tại {candidates[0][0]:.1f}s"
             )
 
-        # Last-resort moving footage. Never leave a block with fewer video
-        # frames than voice audio, because players then display one frozen
-        # frame for the remainder of the narration.
         candidate_seconds = sum(max(0.0, end - start) for start, end, _ in candidates)
         if candidate_seconds < tts_dur - TRIM_TOLERANCE:
-            source_duration = _probe_duration(source_video, ffprobe_bin)
-            is_last_block = (i == len(script_blocks) - 1)
-            # For the last block allow using footage all the way to the end of
-            # the source; earlier blocks keep the -12 s safety margin so that
-            # credits / black frames are avoided in the middle of the recap.
-            content_end = source_duration if is_last_block else max(0.0, source_duration - 12.0)
-            missing = tts_dur - candidate_seconds
-            fallback_start = max(
-                float(source_timeline_cursor or 0.0),
-                max((end for _start, end, _score in candidates), default=0.0),
-            )
-            occupied = used_ranges + [(start, end) for start, end, _score in candidates]
-            unused = _find_forward_unused_range(fallback_start, missing, content_end, occupied)
-            if unused:
-                fallback_start, fallback_end = unused
-                candidates.append((fallback_start, fallback_end, 0.0))
-                log(f"   ℹ️ Block {bid}: bù {fallback_end - fallback_start:.1f}s cảnh chuyển động")
-            elif is_last_block:
-                # For the final block: use whatever footage remains between
-                # fallback_start and source_duration even if it is shorter than
-                # `missing`.  It is better to have the last few seconds of
-                # footage hold on a frame than to fail the whole render.
-                remaining = source_duration - fallback_start
-                if remaining > 0.3:
-                    candidates.append((fallback_start, source_duration, 0.0))
-                    log(
-                        f"   ℹ️ Block {bid} (cuối): dùng {remaining:.1f}s footage còn lại "
-                        f"đến cuối phim (thiếu {missing - remaining:.1f}s so với TTS)"
-                    )
-                else:
-                    log(
-                        f"   ⚠️ Block {bid} (cuối): không còn footage mới "
-                        f"(thiếu {missing:.1f}s); freeze frame cuối sẽ bù phần còn thiếu"
-                    )
-                    # Không return False, không cap tts_dur — mux step sẽ tự freeze
-                    # frame cuối cho đến khi voice kết thúc (tpad=stop_mode=clone)
-            else:
-                log(
-                    f"   ❌ Block {bid}: thiếu {missing:.1f}s cảnh mới sau "
-                    f"{fallback_start:.1f}s; không tái dùng cảnh cũ"
-                )
-                return False
+            raise ValueError(f"Block {bid}: không đủ hình sau khi căn câu voice; cần rút gọn lời kể.")
+        for start, end, _ in candidates:
+            if not any(a - 0.001 <= start and end <= b + 0.001 for a,b in allowed):
+                raise ValueError(f"Block {bid}: clip vượt phạm vi cảnh nguồn.")
 
         # Build video clip
         clip_video = build_clip_concat_list(
@@ -1092,27 +983,14 @@ def assemble_clip_based_video(
         )
 
         if not clip_video:
-            log(f"   ⚠️ Block {bid}: không cắt được clip → skip")
-            continue
+            raise RuntimeError(f"Block {bid}: không cắt được clip; dừng để tránh thiếu nội dung.")
 
         # Mux: clip_video + voice_audio → block_N.mp4
         block_out = os.path.join(blocks_dir, f"block_{bid:04d}.mp4")
         clip_video_dur = _probe_duration(clip_video, ffprobe_bin)
         freeze_needed = tts_dur - clip_video_dur
         if freeze_needed > 0.1:
-            # Video ngắn hơn voice → freeze frame cuối để khớp audio
-            log(f"   🧊 Block {bid}: freeze frame cuối {freeze_needed:.1f}s để khớp voice")
-            mux_cmd = [
-                ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
-                "-i", clip_video,
-                "-i", audio_path,
-                "-filter_complex",
-                f"[0:v]tpad=stop_mode=clone:stop_duration={freeze_needed:.4f}[vout]",
-                "-map", "[vout]", "-map", "1:a:0",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                "-c:a", "aac", "-b:a", "192k",
-                "-t", f"{tts_dur:.4f}", block_out,
-            ]
+            raise ValueError(f"Block {bid}: hình cắt ra thiếu {freeze_needed:.2f}s so với voice; không kéo đứng hình.")
         else:
             mux_cmd = [
                 ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
@@ -1156,7 +1034,7 @@ def assemble_clip_based_video(
             else:
                 log(f"   ✅ Block {bid}/{total}: {tts_dur:.1f}s | {len(candidates)} clips")
         else:
-            log(f"   ⚠️ Block {bid}: mux lỗi: {r.stderr[:100]}")
+            raise RuntimeError(f"Block {bid}: ghép hình và voice thất bại.")
 
     if not block_files:
         log("❌ ClipAssembler: không có block nào thành công")

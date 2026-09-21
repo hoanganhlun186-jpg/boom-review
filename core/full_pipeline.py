@@ -290,6 +290,8 @@ class FullPipeline:
             from core.voice_caption_validation import validate_captions
             default_mode = '0' if self.ai_package.get('voice_concat_continuous') else '1'
             render_timeline = str(os.environ.get('AUTORECAP_VOICE_SRT_RENDER_TIMELINE',default_mode)).lower() not in {'0','false','no','off'}
+            if self._uses_actual_voice_timeline():
+                render_timeline = False
             errors = validate_captions(read_cues(voice_srt_path),self.voice_segments,render_timeline)
             if errors:
                 self._log('   [VOICE_CAPTIONS] FAIL: '+'; '.join(errors))
@@ -708,6 +710,10 @@ class FullPipeline:
             "no",
             "off",
         }
+
+    def _uses_actual_voice_timeline(self):
+        """Use one policy for old editor packages and new block-based renders."""
+        return bool(self.ai_package.get("script_blocks"))
 
     def _target_recap2_beat_seconds(self, target_duration: float = 0.0) -> float:
         """Target spoken beat duration.
@@ -4907,28 +4913,20 @@ class FullPipeline:
         return tpl
 
     def step_voice_segments(self) -> bool:
-        """Tao voice TUNG BLOCK, moi block khop dung duration cua canh video.
+        """Create block narration; measured audio durations drive the final clips.
 
-        THIET KE: Voice phai khop tung canh (vd: canh "dau lau duoi ao"
-        o giay 20-24s thi voice noi ve no cung o giay 20-24s).
-
-        Quy trinh moi block:
-          1. TTS o rate=0% (tu nhien nhat)
-          2. Do duration thuc cua TTS
-          3. atempo nen/gian vua khit target_duration cua block
-             (atempo giu pitch -> giong van muot)
-          4. step_voice_concat dat moi block dung start_in_final_video
-
-        Resume-safe: moi block seg_XXXX.mp3 da co thi bo qua.
+        Planned scene durations remain source hints, not a TTS acceptance gate.
+        Cache reuse requires matching text, voice and timing policy.
         """
         self._step_start("VOICE_SEGMENTS")
         try:
             from core.ai_engine import AIEngine
             from core.voice_timing import VoiceTimingController
 
+            actual_voice_timeline = self._uses_actual_voice_timeline()
             script_blocks = self.ai_package.get("script_blocks", [])
             full_script   = self.ai_package.get("script", "")
-            if script_blocks and self.render_blocks and any(
+            if script_blocks and self.render_blocks and not self.ai_package.get('automatic_review') and any(
                 isinstance(block, dict) and block.get("source_block_ids")
                 for block in script_blocks
             ):
@@ -4951,7 +4949,8 @@ class FullPipeline:
             Path(segments_dir).mkdir(exist_ok=True)
             continuous_default = "1" if self._recap2_beat_mode_enabled() else "0"
             timing_policy = {
-                "version": 8,
+                "version": 9,
+                "actual_voice_timeline": actual_voice_timeline,
                 "voice_id": self.voice,
                 "mode": "recap2_scene_anchored" if self._recap2_beat_mode_enabled() else "scene_pinned",
                 "min_voice_speed": float(os.environ.get("AUTORECAP_MIN_VOICE_SPEED", "1.0") or "1.0"),
@@ -5081,7 +5080,7 @@ class FullPipeline:
                 or any(isinstance(block, dict) and block.get("script_editor_locked") for block in script_blocks)
             )
 
-            if script_blocks and self.render_blocks and not editor_synced:
+            if script_blocks and self.render_blocks and not editor_synced and not actual_voice_timeline:
                 from core.premium_pipeline import PremiumReviewPipeline
                 script_blocks = PremiumReviewPipeline.align_script_blocks_to_book_map(
                     script_blocks, full_script, self.render_blocks
@@ -5123,7 +5122,7 @@ class FullPipeline:
                 except Exception:
                     pass
 
-            if script_blocks and self.render_blocks:
+            if script_blocks and self.render_blocks and not actual_voice_timeline:
                 self.ai_package, normalized_count = self._normalize_script_blocks_to_render_blocks(
                     self.ai_package,
                     self.render_blocks,
@@ -5139,7 +5138,7 @@ class FullPipeline:
                         json.dump(self.ai_package, f, indent=2, ensure_ascii=False)
 
             editor_synced = bool(self.ai_package.get("script_editor_synced"))
-            if editor_synced:
+            if editor_synced and not self.ai_package.get('automatic_review'):
                 synced_render_count = self._sync_editor_script_to_render_blocks()
                 if synced_render_count:
                     self._log(f"   🔗 Đồng bộ Script Editor -> render_blocks: {synced_render_count} cập nhật")
@@ -5331,7 +5330,7 @@ class FullPipeline:
                                 "duplicate_script_blocks",
                                 "empty_script_blocks",
                             }
-                            if not self.ai_package.get("recap2_beat_mode"):
+                            if not actual_voice_timeline:
                                 serious_types.add("too_many_under_target_blocks")
                             serious_errors = [
                                 item for item in real_errors
@@ -5415,7 +5414,7 @@ class FullPipeline:
             # RECAP2 allocates the selected duration while Gemini writes the
             # chapter segments. Never truncate those approved texts again at
             # the TTS boundary: doing so removes narration and the ending.
-            if self.ai_package.get("recap2_beat_mode") and self.max_video_minutes and script_blocks:
+            if actual_voice_timeline and self.max_video_minutes and script_blocks:
                 self.ai_package.pop("target_review_budget_fit", None)
 
             if script_blocks:
@@ -5518,7 +5517,7 @@ class FullPipeline:
                 for attempt in range(2):
                     run_async_task(ai.text_to_speech, combined, raw_path, voice=self.voice, rate="+0%")
                     tts_dur = _probe_dur(raw_path)
-                    if self.ai_package.get("recap2_beat_mode"):
+                    if actual_voice_timeline:
                         repair = {"action": "none", "changed": False, "reason": "recap2_beat_flow"}
                     else:
                         repair = VoiceTimingController.repair_text(
@@ -5544,8 +5543,10 @@ class FullPipeline:
                     except Exception:
                         pass
                 final_dur = _probe_dur(seg_path)
+                if not os.path.exists(seg_path) or final_dur <= 0:
+                    raise RuntimeError("Không có audio hợp lệ cho block voice")
                 voice_segments.append({
-                    "block_id": 0, "audio_path": seg_path,
+                    "block_id": int(script_blocks[0].get("block_id") or 1) if script_blocks else 0, "audio_path": seg_path,
                     "start_in_video": 0.0,
                     "target_duration": target_dur,
                     "text": combined,
@@ -5714,7 +5715,7 @@ class FullPipeline:
                     target_words = int(rb.get("target_words") or block.get("target_words") or 0)
                     actual_words = len(clean.split())
                     min_words = max(8, int(target_words * 0.70)) if target_words > 0 else 0
-                    if (not self.ai_package.get("recap2_beat_mode")) and target_words > 0 and actual_words < min_words and not editor_synced:
+                    if (not actual_voice_timeline) and target_words > 0 and actual_words < min_words and not editor_synced:
                         ai_timing_repair = str(os.environ.get("AUTORECAP_AI_TIMING_REPAIR", "0") or "0").strip().lower() in {
                             "1", "true", "yes", "on"
                         }
@@ -5769,6 +5770,9 @@ class FullPipeline:
                     if clean and clean[-1] not in ".!?":
                         clean += "."
                     text_hash = VoiceTimingController.text_hash(clean)
+                    from core.narration_guard import invalid_narration
+                    if invalid_narration(clean):
+                        raise RuntimeError(f'Block {bid}: AI trả lời từ chối thay vì lời kể; không tạo voice từ nội dung lỗi.')
 
                     # Resume only when the cached audio was generated from the
                     # exact current block text and passed timing validation.
@@ -5803,7 +5807,7 @@ class FullPipeline:
                     block_rate = str(block.get("_tts_rate") or "+0%").strip()
                     if not block_rate.endswith("%"):
                         block_rate = "+0%"
-                    block_rate = _clamp_tts_rate(block_rate)
+                    block_rate = "+0%" if actual_voice_timeline else _clamp_tts_rate(block_rate)
                     for attempt in range(2):
                         run_async_task(ai.text_to_speech, clean, raw_path, voice=self.voice, rate=block_rate)
 
@@ -5818,7 +5822,7 @@ class FullPipeline:
                                 "changed": False,
                                 "reason": "script_editor_confirmed",
                             }
-                            allow_editor_expand = (not self.ai_package.get("recap2_beat_mode")) and str(
+                            allow_editor_expand = (not actual_voice_timeline) and str(
                                 os.environ.get("AUTORECAP_EDITOR_TTS_EXPAND", "0") or "0"
                             ).strip().lower() not in {"0", "false", "no", "off"}
                             assessment = VoiceTimingController.assess(tts_dur, target_dur)
@@ -5840,7 +5844,7 @@ class FullPipeline:
                                         "reason": "script_editor_voice_too_short",
                                     }
                         else:
-                            repair = {"action": "none", "changed": False, "reason": "recap2_beat_flow"} if self.ai_package.get("recap2_beat_mode") else VoiceTimingController.repair_text(clean, target_dur, tts_dur, block)
+                            repair = {"action": "none", "changed": False, "reason": "recap2_beat_flow"} if actual_voice_timeline else VoiceTimingController.repair_text(clean, target_dur, tts_dur, block)
                         timing_repair = repair
                         if attempt == 0 and repair.get("changed"):
                             clean = repair.get("text", clean)
@@ -5861,10 +5865,9 @@ class FullPipeline:
                     if not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
                         continue
 
-                    # Chỉ nén khi voice thật dài hơn toàn bộ evidence range của
-                    # beat. Voice ngắn hơn được giữ tự nhiên; video sẽ cắt theo
-                    # audio thật ở ClipAssembler.
-                    if tts_dur > 0 and target_dur > 0:
+                    # Block-based renders retain audio speed; only legacy fixed
+                    # scene rendering compresses narration to a planned duration.
+                    if not actual_voice_timeline and tts_dur > 0 and target_dur > 0:
                         ratio = tts_dur / target_dur
                         if ratio > 1.02:
                             af = _atempo_chain(ratio)
@@ -5892,7 +5895,7 @@ class FullPipeline:
                     if final_dur > 0 and target_dur > 0:
                         final_ratio = final_dur / target_dur
                         # Nếu vẫn dài hơn 20% hoặc ngắn hơn 40% → thử TTS lại với rate tối ưu
-                        if (not self.ai_package.get("recap2_beat_mode")) and (not editor_synced) and (final_ratio > 1.20 or final_ratio < 0.60):
+                        if (not actual_voice_timeline) and (not editor_synced) and (final_ratio > 1.20 or final_ratio < 0.60):
                             words = len(clean.split())
                             natural_dur = words / 2.5  # 2.5 từ/giây tự nhiên
                             opt_ratio = natural_dur / target_dur
@@ -5938,7 +5941,7 @@ class FullPipeline:
                         pass
 
                     actual_voice_dur = float(final_dur or tts_dur or 0.0)
-                    recap2_flow = bool(self.ai_package.get("recap2_beat_mode"))
+                    recap2_flow = bool(actual_voice_timeline)
                     timing_status = VoiceTimingController.assess(actual_voice_dur, target_dur).get("status", "unknown")
                     if editor_synced:
                         if recap2_flow:
@@ -6043,7 +6046,7 @@ class FullPipeline:
                     "App đã dừng trước khi nối/render để không tạo video hụt tiếng.",
                 )
                 return False
-            if self.ai_package.get("recap2_beat_mode"):
+            if actual_voice_timeline:
                 planned_voice = float(
                     self.ai_package.get("target_review_seconds")
                     or self.ai_package.get("planned_duration_seconds")
@@ -6060,7 +6063,7 @@ class FullPipeline:
                         f"   RECAP2: voice thực {actual_voice:.1f}s | ngân sách chapter {planned_voice:.1f}s "
                         "(không ép cắt/dừng pipeline)"
                     )
-            if editor_synced and (not self.ai_package.get("recap2_beat_mode")) and editor_actual_timing_errors:
+            if editor_synced and (not actual_voice_timeline) and editor_actual_timing_errors:
                 self.ai_package["script_editor_actual_tts_timing_errors"] = editor_actual_timing_errors
                 try:
                     with open(os.path.join(self.output_dir, "ai_package.json"), "w", encoding="utf-8") as f:
@@ -6110,12 +6113,75 @@ class FullPipeline:
     # STEP 9: VOICE_CONCAT
     # ──────────────────────────────────────────────────────────────
 
-    def step_voice_concat(self) -> bool:
-        """Ghep cac block voice vao timeline theo start_in_video.
+    def prepare_automatic_review(self):
+        """Run scene and duplicate repair without opening the editor."""
+        from engine.ai_engine import AIEngine
+        try:
+            import hashlib
+            def review_signature():
+                return hashlib.sha256(json.dumps(self.ai_package.get('script_blocks', []),
+                    ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+            from core.narration_guard import invalid_narration
+            if (self.ai_package.get('automatic_review_signature') == review_signature()
+                    and not any(invalid_narration(b.get('text')) for b in self.ai_package.get('script_blocks', []))):
+                self._log('   🔒 Dùng lại kịch bản đã tự kiểm tra; không sửa lại khi retry voice.')
+                return True
+            self.ai_package['automatic_review'] = True
+            self.ai_package['script_editor_synced'] = False
+            self.ai_package['script_editor_locked'] = False
+            for block in self.ai_package.get('script_blocks', []):
+                block['script_editor_locked'] = False
+                block['script_editor_synced'] = False
+            ai = AIEngine(api_key=self.gemini_api_key)
+            for attempt in range(3):
+                blocks, changed, duplicates = self._rewrite_duplicate_sentences_for_tts(
+                    ai, self.ai_package.get('script_blocks', []), self.render_blocks)
+                self.ai_package['script_blocks'] = blocks
+                from core.narration_guard import invalid_narration
+                for block in blocks:
+                    if invalid_narration(block.get('text')):
+                        reference = str(block.get('srt_anchor') or block.get('visual_anchor') or block.get('visual_hint') or '')
+                        source_ids = block.get('source_block_ids') or []
+                        if isinstance(source_ids, str):
+                            source_ids = [int(v) for v in re.findall(r'\d+', source_ids)]
+                        refs = [r for r in self.render_blocks if r.get('block_id') in source_ids]
+                        reference += '\n' + json.dumps(refs, ensure_ascii=False)
+                        candidate = AIEngine._clean_tts_text(ai._try_generate(
+                            'Viết lại lời kể tiếng Việt cho đúng đoạn phim dựa trên dữ liệu bên dưới. '
+                            'Chỉ kể sự kiện được cung cấp, không tự giới thiệu, không trả lời người dùng, '
+                            'không thêm tình tiết. Chỉ trả lời kể ngắn gọn, không JSON.\n' + reference) or '')
+                        if not invalid_narration(candidate):
+                            block['text'] = candidate
+                self.ai_package, report = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
+                errors = int(report.get('error_count') or 0)
+                self._log(f'   🔧 Tự kiểm tra kịch bản lần {attempt+1}/3: {duplicates} câu lặp, {errors} lỗi bám cảnh')
+                if errors:
+                    self._repair_srt_alignment_final_pass(ai, report, max_blocks=len(blocks))
+                self.ai_package['script'] = '\n\n'.join(b.get('text', '') for b in self.ai_package['script_blocks'])
+                with open(os.path.join(self.output_dir, 'ai_package.json'), 'w', encoding='utf-8') as handle:
+                    json.dump(self.ai_package, handle, ensure_ascii=False, indent=2)
+                if not errors and not duplicates and not any(invalid_narration(b.get('text')) for b in self.ai_package['script_blocks']):
+                    # Reuse the established approved-script guard for automatic
+                    # approval too. TTS retries must never rewrite approved text.
+                    self.ai_package['script_editor_synced'] = True
+                    self.ai_package['script_editor_locked'] = True
+                    self.ai_package['voice_source'] = 'automatic_review'
+                    for block in self.ai_package['script_blocks']:
+                        block['script_editor_locked'] = True
+                    self.ai_package['automatic_review_signature'] = review_signature()
+                    with open(os.path.join(self.output_dir, 'ai_package.json'), 'w', encoding='utf-8') as handle:
+                        json.dump(self.ai_package, handle, ensure_ascii=False, indent=2)
+                    return True
+            raise RuntimeError('Tự sửa kịch bản 3 lượt vẫn chưa đạt; chưa gửi TTS để tránh tốn phí.')
+        except Exception as error:
+            self.script_review_error = str(error)
+            self._log(f'   ❌ Tự sửa kịch bản chưa thành công: {error}')
+            return False
 
-        Moi block da duoc atempo nen vua duration o step truoc.
-        Dat moi block dung vi tri start_in_video + silence gap giua cac block
-        -> voice khop dung tung canh video.
+    def step_voice_concat(self) -> bool:
+        """Concatenate block narration in script order using measured durations.
+
+        Legacy jobs without script blocks retain their scene-pinned timeline.
         """
         concat_path = os.path.join(self.output_dir, "voice_track.mp3")
         seg_meta_path = os.path.join(self.output_dir, "voice_segments.json")
@@ -6139,8 +6205,14 @@ class FullPipeline:
         except Exception:
             max_voice_gap = 0.12 if editor_synced_for_concat else 0.35
         max_voice_gap = max(0.0, min(max_voice_gap, 2.0))
+        actual_voice_timeline = self._uses_actual_voice_timeline()
+        if actual_voice_timeline:
+            continuous_voice = True
+            max_voice_gap = 0.0
         voice_concat_policy = {
-            "version": 4,
+            "version": 7,
+            "playback_speed": 1.2,
+            "actual_voice_timeline": actual_voice_timeline,
             "continuous_voice": bool(continuous_voice),
             "max_voice_gap": round(max_voice_gap, 3),
             "script_editor_synced": bool(editor_synced_for_concat),
@@ -6169,9 +6241,45 @@ class FullPipeline:
 
         try:
             segs = sorted(self.voice_segments, key=lambda s: s.get("start_in_video", 0.0))
+            if actual_voice_timeline:
+                by_id = {int(seg['block_id']): seg for seg in self.voice_segments}
+                ids = [int(block.get('block_id') or index) for index, block in enumerate(self.ai_package['script_blocks'], 1)]
+                if len(by_id) != len(self.voice_segments) or len(set(ids)) != len(ids) or set(ids) != set(by_id):
+                    raise RuntimeError("Danh sách voice không đủ hoặc trùng mã block kịch bản")
+                segs = [by_id[bid] for bid in ids]
             if not segs:
                 self._step_fail("VOICE_CONCAT", "Không có voice segment")
                 return False
+
+            if actual_voice_timeline:
+                from core.voice_fit import fit_voices
+                from engine.ai_engine import AIEngine
+                fit_ai = None
+                def get_fit_ai():
+                    nonlocal fit_ai
+                    if fit_ai is None:
+                        fit_ai = AIEngine(api_key=self.gemini_api_key)
+                    return fit_ai
+                def rewrite_fit(text, words, block):
+                    prompt = (
+                        f'Rút gọn lời kể phim sau xuống tối đa {words} từ để khớp thời gian cảnh. '
+                        'Giữ đúng nhân vật, hành động chính, quan hệ nhân quả và thứ tự sự kiện. '
+                        'Không thêm tình tiết, không bỏ ý kết thúc/CTA nếu có. '
+                        'Giữ ngôn ngữ gốc, câu trọn nghĩa. Chỉ trả văn bản lời kể, không giải thích.\n'
+                        + text)
+                    return AIEngine._clean_tts_text(get_fit_ai()._try_generate(prompt) or '')
+                def synthesize_fit(text, path):
+                    run_async_task(get_fit_ai().text_to_speech, text, path, voice=self.voice, rate='+0%')
+                def save_fit():
+                    self.ai_package['script'] = '\n\n'.join(b.get('text', '') for b in self.ai_package['script_blocks'])
+                    for path, data in ((seg_meta_path, self.voice_segments),
+                                       (os.path.join(self.output_dir, 'ai_package.json'), self.ai_package)):
+                        temporary = path + '.fit.tmp'
+                        with open(temporary, 'w', encoding='utf-8') as handle:
+                            json.dump(data, handle, ensure_ascii=False, indent=2)
+                        os.replace(temporary, path)
+                fit_voices(self.ai_package['script_blocks'], segs, self.render_blocks, self.scenes,
+                           ffmpeg_bin, self._media_duration, rewrite_fit, synthesize_fit, save_fit, self._log)
 
             def fmt(v): return f"{max(0.001, float(v)):.4f}"
 
@@ -6181,10 +6289,11 @@ class FullPipeline:
                 # Step 1: chuan hoa moi block sang WAV + fade nhe
                 norm_blocks = []
                 for idx, seg in enumerate(segs):
+                    from core.voice_speed import speed_voice
+                    speed_voice(seg, ffmpeg_bin, 1.2)
                     src = seg.get("audio_path", "")
                     if not src or not os.path.exists(src):
-                        norm_blocks.append(None)
-                        continue
+                        raise RuntimeError(f"Thiếu voice block {seg.get('block_id')}")
                     tmp = tempfile.NamedTemporaryFile(suffix=f"_n{idx:04d}.wav", delete=False).name
                     tmp_files.append(tmp)
                     # probe dur de tinh fade-out
@@ -6205,7 +6314,7 @@ class FullPipeline:
                         check=False, capture_output=True, text=True
                     ))
                     if r.returncode != 0:
-                        norm_blocks.append(None)
+                        raise RuntimeError(f"Không giải mã được voice block {seg.get('block_id')}")
                     else:
                         norm_blocks.append(tmp)
 
@@ -6225,7 +6334,7 @@ class FullPipeline:
                     if nb is None:
                         continue
                     desired_start = float(seg.get("start_in_video") or 0.0)
-                    start = desired_start
+                    start = prev_end if actual_voice_timeline else desired_start
                     # probe dur thuc cua block da chuan hoa
                     pr = subprocess.run(
                         [ffmpeg_bin, "-i", nb, "-f", "null", "-"],
@@ -6234,8 +6343,12 @@ class FullPipeline:
                     m = re.search(r"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)", pr.stderr)
                     bdur = (int(m.group(1))*3600 + int(m.group(2))*60 +
                             int(m.group(3)) + int(m.group(4))/100) if m else 4.0
+                    if actual_voice_timeline:
+                        bdur = self._media_duration(nb)
+                        if bdur <= 0:
+                            raise RuntimeError(f"Không đo được voice block {seg.get('block_id')}")
 
-                    if continuous_voice and prev_end > 0:
+                    if continuous_voice and not actual_voice_timeline and prev_end > 0:
                         gap_to_scene = desired_start - prev_end
                         if gap_to_scene > max_voice_gap:
                             start = prev_end + max_voice_gap
@@ -6288,7 +6401,7 @@ class FullPipeline:
                 # Trailing silence den het video
                 # RECAP2 ClipAssembler mode: video cuối = tổng TTS duration (không phải cut_video)
                 # → không cần trailing silence fill cut_duration
-                if self._recap2_beat_mode_enabled():
+                if actual_voice_timeline or self._recap2_beat_mode_enabled():
                     video_dur = float(prev_end or 0.0)  # voice kết thúc ở đây là hết
                 else:
                     video_dur = self.cut_duration or 0.0
@@ -6506,6 +6619,8 @@ class FullPipeline:
         voice_srt_timeline_mode = "render_blocks_v1" if str(
             os.environ.get("AUTORECAP_VOICE_SRT_RENDER_TIMELINE", default_render_timeline) or default_render_timeline
         ).strip().lower() not in {"0", "false", "no", "off"} else "actual_voice_v1"
+        if self._uses_actual_voice_timeline():
+            voice_srt_timeline_mode = "actual_voice_v1"
         voice_srt_policy = {
             "version": 3,
             "timeline": voice_srt_timeline_mode,
@@ -6911,6 +7026,8 @@ class FullPipeline:
             use_render_timeline = str(
                 os.environ.get("AUTORECAP_VOICE_SRT_RENDER_TIMELINE", default_render_timeline) or default_render_timeline
             ).strip().lower() not in {"0", "false", "no", "off"}
+            if self._uses_actual_voice_timeline():
+                use_render_timeline = False
 
             for seg in self.voice_segments:
                 if use_render_timeline:
@@ -7034,7 +7151,7 @@ class FullPipeline:
             "version": 8,
             "clip_assembler_source_override": True,
             "duration_policy": "actual_voice_no_pad_no_global_atempo",
-            "scene_sync_policy": "actual_tts_sentence_timeline_to_srt_evidence",
+            "scene_sync_policy": "fixed_source_voice_speed120_v3",
             "target_review_seconds": round(float((self.max_video_minutes * 60.0) if self.max_video_minutes else 0.0), 3),
             "script_editor_synced": bool(self.ai_package.get("script_editor_synced")),
             "script_editor_sync_id": self.ai_package.get("script_editor_sync_id")
@@ -7088,7 +7205,7 @@ class FullPipeline:
             # ── RECAP2.0 STYLE: ClipAssembler ───────────────────────────────
             # Khi recap2_beat_mode bật: cắt clip fit TTS duration thay vì
             # dùng cut_video cố định + atempo.
-            if self._recap2_beat_mode_enabled() and self.voice_segments and self.ai_package.get("script_blocks"):
+            if self._uses_actual_voice_timeline() and self.voice_segments:
                 try:
                     from core.clip_assembler import assemble_clip_based_video
                     from engine.video_engine import VideoEngine as _VE
@@ -7395,6 +7512,45 @@ class FullPipeline:
     # Run full pipeline
     # ──────────────────────────────────────────────────────────────
 
+    def resume_saved(self, **run_options):
+        """Restore completed artifacts without re-entering AI_FULL or review."""
+        from core.resume_job import read_json
+        root = Path(self.output_dir)
+        state = read_json(root / 'pipeline_state.json')
+        if not isinstance(state, dict):
+            self._log('❌ Không đọc được trạng thái job; không chạy mới.')
+            return False
+        package = read_json(root / 'ai_package.json')
+        if not isinstance(package, dict) or not package.get('script_blocks'):
+            self._log('♻️ Job chưa có kịch bản hợp lệ; tiếp tục các bước đầu bằng cache.')
+            return self.run(**run_options)
+        self.ai_package = package
+        self.render_blocks = read_json(root / 'render_blocks.json') or package.get('render_blocks') or []
+        self.scenes = read_json(root / 'scenes.json') or []
+        self.metadata = read_json(root / 'metadata.json') or {}
+        self.subtitle_map = read_json(root / 'subtitle_map.json') or []
+        self.cut_video_path = str(root / 'cut_video.mp4')
+        self.cut_duration = self._media_duration(self.cut_video_path) if os.path.isfile(self.cut_video_path) else 0
+        segments = read_json(root / 'voice_segments.json') or []
+        ids = {int(b['block_id']) for b in package['script_blocks']}
+        valid = isinstance(segments, list) and len(segments) == len(ids)
+        if valid:
+            valid = {int(s['block_id']) for s in segments} == ids and all(
+                os.path.isfile(s.get('audio_path', '')) and self._media_duration(s['audio_path']) > 0 for s in segments)
+        self.voice_segments = segments if isinstance(segments, list) else []
+        self._log(f'♻️ Đã nạp {len(ids)} block từ job; giữ kịch bản, không chạy lại AI_FULL.')
+        if not valid:
+            if not self._with_retry(self.step_voice_segments, 'VOICE_SEGMENTS'):
+                return False
+        else:
+            self._resume_skip('VOICE_SEGMENTS', f'{len(segments)} file voice hợp lệ')
+        for name, function in [('VOICE_CONCAT', self.step_voice_concat),
+                               ('VOICE_SRT', self.step_voice_srt),
+                               ('RENDER_FINAL', self.step_render_final)]:
+            if not self._with_retry(function, name):
+                return False
+        return True
+
     def run(
         self,
         skip_transcript: bool = False,
@@ -7497,7 +7653,7 @@ class FullPipeline:
                 except Exception:
                     pass
             # ── SCRIPT REVIEW ─────────────────────────────────────────────────
-            self._log("\n⏸️  Dừng để chỉnh sửa kịch bản — xác nhận xong mới tạo voice...\n")
+            self._log("\n🔧 Kiểm tra và sửa kịch bản trước khi tạo voice...\n")
             if self.step_callback:
                 self._safe_step_callback("SCRIPT_REVIEW", "waiting")
             proceed = self.script_review_callback(self)

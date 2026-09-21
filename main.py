@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.27"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.28"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
@@ -1504,6 +1504,13 @@ class App(PreviewEditorMixin, QMainWindow):
     def _load_saved_config(self):
         try:
             cfg = self.load_config()
+            if cfg.get("gemini_api_key"):
+                self.api_key.insert(0, cfg["gemini_api_key"])
+            if cfg.get("gemini_keys_file"):
+                self.api_keys_file.insert(0, cfg["gemini_keys_file"])
+            if cfg.get("openrouter_api_key"):
+                self.openrouter_api_key.insert(0, cfg["openrouter_api_key"])
+            self.pekka_api_key.setText(str(cfg.get("pekka_api_key", "") or ""))
             audio_enabled = bool(cfg.get("preview_audio_enabled", True))
             self._manual_script_review.blockSignals(True)
             self._manual_script_review.setChecked(bool(cfg.get('manual_script_review', False)))
@@ -1519,13 +1526,6 @@ class App(PreviewEditorMixin, QMainWindow):
                 checkbox.blockSignals(True)
                 checkbox.setChecked(bool(cfg.get(name+"_visible", True)))
                 checkbox.blockSignals(False)
-            if cfg.get("gemini_api_key"):
-                self.api_key.insert(0, cfg["gemini_api_key"])
-            if cfg.get("gemini_keys_file"):
-                self.api_keys_file.insert(0, cfg["gemini_keys_file"])
-            if cfg.get("openrouter_api_key"):
-                self.openrouter_api_key.insert(0, cfg["openrouter_api_key"])
-            self.pekka_api_key.setText(str(cfg.get("pekka_api_key", "") or ""))
             self._pekka_voices = cfg.get("pekka_voices") or []
             self.tts_language.set(cfg.get("tts_language", "Tiếng Việt"))
             self.on_tts_language_change(self.tts_language.get())
@@ -3241,76 +3241,8 @@ class App(PreviewEditorMixin, QMainWindow):
         threading.Thread(target=_gen_title_thread, daemon=True).start()
 
     def _make_script_review_callback(self):
-        """Tạo callback để hiện Script Editor sau AI_FULL.
-
-        Pipeline gọi callback này, truyền chính nó làm tham số.
-        Callback chạy trên pipeline thread → cần dùng threading.Event để chờ
-        UI thread mở cửa sổ và user xác nhận.
-        """
-        if not self._manual_script_review.isChecked():
-            return None
-        import threading as _threading
-
-        app_ref = self  # reference tới App instance
-
-        def callback(pipeline) -> bool:
-            """Chạy trên worker thread — phải chờ main thread."""
-            event = _threading.Event()
-            pipeline.script_review_error = ''
-            result_holder = [False]  # chỉ tiếp tục khi user bấm xác nhận rõ ràng
-
-            def _open_editor():
-                """Chạy trên main (Tk) thread."""
-                try:
-                    from ui.script_editor import ScriptEditorWindow
-
-                    def on_confirm():
-                        result_holder[0] = True
-                        event.set()
-
-                    def on_cancel():
-                        result_holder[0] = False
-                        event.set()
-
-                    n = len((pipeline.ai_package or {}).get("script_blocks") or [])
-                    pipeline._log(f"\n✏️  Script Editor: {n} blocks sẵn sàng để chỉnh sửa\n")
-
-                    editor = ScriptEditorWindow(
-                        parent=app_ref,
-                        pipeline=pipeline,
-                        on_confirm=on_confirm,
-                        on_cancel=on_cancel,
-                    )
-                    # Editor không modal: có thể thu nhỏ để dùng app khác rồi mở lại.
-                except Exception as e:
-                    result_holder[0] = False
-                    pipeline.script_review_error = str(e)
-                    pipeline._log(f"   ⚠️ Không mở được Script Editor: {e} → dừng, không tạo voice\n")
-                    event.set()
-
-            # Lên lịch mở editor trên main thread
-            app_ref.after(0, _open_editor)
-
-            # Chờ user xác nhận. Mặc định không timeout để pipeline không tự hủy
-            # khi người dùng còn đang chỉnh trong Script Editor.
-            timeout_raw = str(os.environ.get("AUTORECAP_SCRIPT_EDITOR_TIMEOUT", "0") or "0").strip()
-            try:
-                timeout_seconds = float(timeout_raw)
-            except Exception:
-                timeout_seconds = 0.0
-            if timeout_seconds > 0:
-                completed = event.wait(timeout=timeout_seconds)
-            else:
-                completed = event.wait()
-            if not completed:
-                result_holder[0] = False
-                try:
-                    pipeline._log("   ⚠️ Script Editor timeout: chưa xác nhận nên dừng pipeline, không tạo voice/render\n")
-                except Exception:
-                    pass
-            return result_holder[0]
-
-        return callback
+        """Review and repair on the pipeline worker, without opening an editor."""
+        return lambda pipeline: pipeline.prepare_automatic_review()
 
     def start_thread(self):
         """Luôn chạy Full Pipeline (workflow đã được tích hợp vào pipeline)."""
@@ -3350,16 +3282,23 @@ class App(PreviewEditorMixin, QMainWindow):
             self.log.see("end")
             return
         # Dùng output_dir hiện tại (không tạo mới) → pipeline tự skip bước đã xong
-        output_dir = self._ensure_video_output_dir(video_path, force_new=False, update_entries=False)
+        from core.resume_job import find_resume_job
+        current = self.output_dir.get().strip()
+        output_dir = find_resume_job(
+            [current, self._output_base_from_entry(video_path),
+             os.path.join(os.path.expanduser('~'), 'Documents', 'BoomReview', 'exports')], video_path)
         if not output_dir:
-            self.log.insert("end", "❌ Chưa có output_dir — hãy chạy pipeline lần đầu trước.\n")
+            self.log.insert("end", "❌ Không tìm thấy job chưa hoàn tất của đúng video này. Không tạo job mới.\n")
             self.log.see("end")
             return
-        self.log.insert("end", "♻️  Resume pipeline — bỏ qua bước đã xong, chạy lại bước lỗi...\n")
+        self.output_dir.delete(0, 'end')
+        self.output_dir.insert(0, output_dir)
+        self.log.insert("end", f"♻️ Tiếp tục job đã lưu: {output_dir}\n")
         self.log.see("end")
         threading.Thread(
             target=self._full_pipeline_worker,
             args=(video_path, output_dir),
+            kwargs={'resume_saved': True},
             daemon=True,
         ).start()
 
@@ -6789,7 +6728,7 @@ Tạo JSON ngay."""
 
         self._full_pipeline_worker(video_path, output_dir)
 
-    def _full_pipeline_worker(self, video_path: str, output_dir: str):
+    def _full_pipeline_worker(self, video_path: str, output_dir: str, resume_saved=False):
         """Worker thread cho Full Pipeline."""
         # Disable run button to prevent double execution
         self.after(0, lambda: self.btn_run.configure(
@@ -6961,7 +6900,7 @@ Tạo JSON ngay."""
             skip_scene      = self._fp_skip_scene.get()      if hasattr(self, "_fp_skip_scene")      else False
             skip_kf         = self._fp_skip_kf.get()         if hasattr(self, "_fp_skip_kf")         else False
 
-            success = pipeline.run(
+            success = (pipeline.resume_saved if resume_saved else pipeline.run)(
                 skip_transcript=skip_transcript,
                 skip_scene_detect=skip_scene,
                 skip_keyframes=skip_kf,

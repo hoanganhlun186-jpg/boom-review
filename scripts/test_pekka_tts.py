@@ -31,6 +31,28 @@ def response(status=200, payload=None, content=b""):
 
 
 class PekkaTests(unittest.TestCase):
+    def test_download_resume_never_reposts_paid_request(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(pekka.requests, 'post', return_value=response(payload={'url':'/audio/test'})) as post, \
+                patch.object(pekka.requests, 'get', side_effect=[pekka.requests.Timeout()]*3+[response(content=audio_fixture())]) as get, \
+                patch.object(pekka.time, 'sleep'):
+            target=Path(folder)/'voice.mp3'
+            with self.assertRaisesRegex(RuntimeError,'3 lần'):
+                pekka.synthesize_pekka('Xin chào',target,'pekka:test',api_key='test')
+            pekka.synthesize_pekka('Xin chào',target,'pekka:test',api_key='test')
+            pekka.synthesize_pekka('Xin chào',target,'pekka:test',api_key='test')
+            self.assertEqual(post.call_count,1)
+            self.assertEqual(get.call_count,4)
+            self.assertTrue(target.exists())
+
+    def test_uncertain_submission_cannot_be_repeated_by_pipeline(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(pekka.requests,'post',side_effect=pekka.requests.Timeout()) as post:
+            for _ in range(3):
+                with self.assertRaises(RuntimeError):
+                    pekka.synthesize_pekka('Xin chào',Path(folder)/'voice.mp3','pekka:test',api_key='test')
+            self.assertEqual(post.call_count,1)
+
     def test_all_bundled_samples_are_available(self):
         from engine.pekka_samples import bundled_voices, bundled_sample_path
         voices = bundled_voices()
@@ -168,7 +190,7 @@ class PekkaTests(unittest.TestCase):
                 self.assertEqual(post.call_args.kwargs["json"]["voiceId"], "test")
                 self.assertNotIn("headers", get.call_args.kwargs)
                 self.assertEqual(get.call_args.args[0], pekka.BASE_URL + "/audio/test")
-                self.assertEqual(list(Path(folder).iterdir()), [target])
+                self.assertEqual(set(p.name for p in Path(folder).iterdir()), {target.name, '.pekka_resume'})
 
     def test_invalid_audio_preserves_previous_output(self):
         with tempfile.TemporaryDirectory() as folder, \

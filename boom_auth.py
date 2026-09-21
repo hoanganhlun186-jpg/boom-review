@@ -15,7 +15,8 @@ from PySide6.QtGui import QFont, QIcon, QPixmap
 # CẤU HÌNH — đổi SERVER_URL thành URL server thật của bạn
 # ============================================================
 SERVER_URL = "http://163.61.182.119:8000"
-TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth_token.json")
+from config import ConfigManager
+TOKEN_FILE = os.path.join(os.path.dirname(ConfigManager.get_default_config_path()), "auth_token.json")
 REQUEST_TIMEOUT = 15
 
 
@@ -23,17 +24,12 @@ REQUEST_TIMEOUT = 15
 # Lưu / đọc token local
 # ============================================================
 def save_token(username: str, token: str, expiry: str):
-    try:
-        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-            json.dump({"username": username, "token": token, "expiry": expiry}, f)
-    except Exception:
-        pass
+    return ConfigManager(TOKEN_FILE).save({"username": username, "token": token, "expiry": expiry})
 
 def load_token() -> dict:
     try:
         if os.path.exists(TOKEN_FILE):
-            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+            return ConfigManager(TOKEN_FILE).load()
     except Exception:
         pass
     return {}
@@ -53,12 +49,12 @@ def is_token_valid(token_data: dict) -> bool:
     if not expiry_str:
         return False
     try:
-        expiry = datetime.datetime.strptime(expiry_str[:19], "%Y-%m-%d %H:%M:%S")
-        return expiry > datetime.datetime.now()
+        expiry = datetime.datetime.fromisoformat(expiry_str.strip().replace("Z", "+00:00"))
+        return expiry > datetime.datetime.now(expiry.tzinfo)
     except Exception:
         return False
 
-def verify_token_with_server(token: str) -> bool:
+def verify_token_with_server(token: str):
     """Xác minh token với server — dùng khi khởi động app."""
     try:
         resp = requests.get(
@@ -66,9 +62,13 @@ def verify_token_with_server(token: str) -> bool:
             headers={"Authorization": f"Bearer {token}"},
             timeout=REQUEST_TIMEOUT
         )
-        return resp.status_code == 200
+        if resp.status_code == 200:
+            return True
+        if resp.status_code in (401, 403):
+            return False
+        return None
     except Exception:
-        return False
+        return None
 
 
 # ============================================================
@@ -117,6 +117,7 @@ class LoginDialog(QDialog):
         self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
         self._thread = None
         self._build_ui()
+        self.txt_user.setText(str(load_token().get("username", "")))
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -206,10 +207,16 @@ class LoginDialog(QDialog):
         self._thread.start()
 
     def _on_success(self, data: dict):
-        username = data.get("username", "")
+        username = data.get("username") or self.txt_user.text().strip()
         token    = data.get("token", "")
         expiry   = data.get("expiry", "")
-        save_token(username, token, expiry)
+        if not token:
+            self._on_failed("Server chưa trả phiên đăng nhập hợp lệ. Vui lòng thử lại.")
+            return
+        if not save_token(username, token, expiry):
+            QMessageBox.warning(self, "Không lưu được đăng nhập",
+                                "Bạn vẫn có thể sử dụng app, nhưng chưa lưu được phiên đăng nhập cho lần sau.")
+        self.txt_pass.clear()
         self.login_success.emit(username, token)
         self.accept()
 
@@ -235,10 +242,12 @@ def check_auth(parent=None) -> tuple[bool, str, str]:
     # 1) Token còn hạn — kiểm tra nhanh với server
     if is_token_valid(token_data):
         token = token_data["token"]
-        if verify_token_with_server(token):
+        verified = verify_token_with_server(token)
+        if verified is True:
             return True, token_data["username"], token
         # Token expired hoặc server từ chối → xóa, yêu cầu đăng nhập lại
-        clear_token()
+        if verified is False:
+            clear_token()
 
     # 2) Hiện dialog đăng nhập
     dialog = LoginDialog(parent)

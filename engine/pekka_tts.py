@@ -1,5 +1,8 @@
 """Pekka voice adapter (API contract from render_dub_feature.py)."""
 import os
+import hashlib
+import json
+import time
 import re
 import subprocess
 import tempfile
@@ -121,30 +124,57 @@ def synthesize_pekka(text, output_path, voice, rate="+0%", api_key=None,
     with tempfile.TemporaryDirectory(prefix="pekka_", dir=str(target.parent)) as folder:
         files = []
         for index, chunk in enumerate(chunks):
+            identity = hashlib.sha256(json.dumps([chunk, voice_id, speed], ensure_ascii=False).encode()).hexdigest()
+            cache = target.parent / '.pekka_resume' / identity
+            cache.mkdir(parents=True, exist_ok=True)
+            state_path = cache / 'request.json'
+            part = cache / 'audio.part'
+            state = json.loads(state_path.read_text(encoding='utf-8')) if state_path.exists() else {}
+            if part.exists() and part.stat().st_size:
+                files.append(part)
+                continue
+            url = state.get('url')
+            if not url and state.get('submitted'):
+                raise RuntimeError('Yêu cầu Pekka trước chưa xác định kết quả. Đã dừng gửi lại để tránh trừ credit lần nữa; kiểm tra lịch sử Pekka.')
             try:
-                response = requests.post(BASE_URL + "/api/v1/tts/sync",
-                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                    json={"text": chunk, "voiceId": voice_id, "speed": speed}, timeout=(15, 180))
-                _check_response(response)
-                url = response.json().get("url")
+                if not url:
+                    state_path.write_text(json.dumps({'submitted': True}), encoding='utf-8')
+                    response = requests.post(BASE_URL + "/api/v1/tts/sync",
+                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                        json={"text": chunk, "voiceId": voice_id, "speed": speed}, timeout=(15, 180))
+                    if response.status_code in (401, 402, 403, 429):
+                        state_path.unlink(missing_ok=True)
+                    _check_response(response)
+                    url = response.json().get("url")
                 if not isinstance(url, str) or not url.strip():
                     raise RuntimeError("Pekka không trả URL âm thanh.")
                 url = urljoin(BASE_URL + "/", url)
                 if urlparse(url).scheme != "https":
                     raise RuntimeError("URL âm thanh Pekka không hợp lệ.")
-                audio = requests.get(url, timeout=(15, 120))
-                _check_response(audio)
-                if not audio.content:
-                    raise RuntimeError("Pekka trả file âm thanh trống.")
+                staged_state = cache / 'request.tmp'
+                staged_state.write_text(json.dumps({'submitted': True, 'url': url}), encoding='utf-8')
+                os.replace(staged_state, state_path)
+                for attempt in range(3):
+                    try:
+                        audio = requests.get(url, timeout=(15, 120))
+                        _check_response(audio)
+                        if not audio.content:
+                            raise RuntimeError("Pekka trả file âm thanh trống.")
+                        break
+                    except (requests.RequestException, RuntimeError):
+                        if attempt == 2:
+                            raise RuntimeError('Tải audio Pekka thất bại sau 3 lần. Đã lưu link để tiếp tục tải, không tạo lại voice.') from None
+                        time.sleep(2 * (attempt + 1))
             except requests.RequestException:
                 raise RuntimeError("Không tải được âm thanh Pekka. Kiểm tra mạng và thử lại.") from None
-            part = Path(folder) / f"part_{index}.audio"
-            part.write_bytes(audio.content)
+            staged_part = cache / 'audio.tmp'
+            staged_part.write_bytes(audio.content)
+            os.replace(staged_part, part)
             files.append(part)
             if progress_callback:
                 progress_callback(int((index + 1) * 100 / len(chunks)), index + 1, len(chunks))
         manifest = Path(folder) / "parts.txt"
-        manifest.write_text("".join(f"file '{p.name}'\n" for p in files), encoding="utf-8")
+        manifest.write_text("".join("file '" + p.as_posix().replace("'", "'\\''") + "'\n" for p in files), encoding="utf-8")
         staged = Path(folder) / ("result" + target.suffix.lower())
         codec = ["-c:a", "pcm_s16le"] if target.suffix.lower() == ".wav" else ["-c:a", "libmp3lame", "-b:a", "192k"]
         result = subprocess.run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
@@ -152,6 +182,8 @@ def synthesize_pekka(text, output_path, voice, rate="+0%", api_key=None,
             "-ac", "1", *codec, str(staged)],
             **FFmpegUtils.subprocess_kwargs(capture_output=True, timeout=180))
         if result.returncode or not staged.exists() or staged.stat().st_size < 100:
+            for part in files:
+                part.unlink(missing_ok=True)
             raise RuntimeError("Không giải mã/ghép được âm thanh Pekka.")
         os.replace(staged, target)
     return str(target)

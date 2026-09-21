@@ -16,7 +16,9 @@ class VoiceCaptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             pipeline = FullPipeline('',folder)
             pipeline.ai_package = {'script_blocks':[{'block_id':1,'text':'Lời kể'}]}
-            pipeline.voice_segments = [{'block_id':1,'text':'Lời kể'}]
+            audio = Path(folder)/'voice.mp3'
+            audio.write_bytes(b'fixture: audio contents are not decoded by this test')
+            pipeline.voice_segments = [{'block_id':1,'text':'Lời kể','audio_path':str(audio)}]
             pipeline.render_blocks = [{'block_id':1}]
             report = {'blocks':[{'block_id':1,'errors':['missing_cut_evidence_anchor']}]}
             with patch('core.srt_alignment.SrtAlignmentValidator.annotate_package',return_value=({},report)), \

@@ -4,12 +4,14 @@ import hashlib
 import json
 import os
 import platform
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
 # ── Fields được mã hóa (API keys, không để plaintext) ────────────────────────
 _SENSITIVE_FIELDS = {
-    "gemini_api_key", "openrouter_api_key", "gemini_keys_file",
+    "gemini_api_key", "openrouter_api_key", "gemini_keys_file", "pekka_api_key", "token",
 }
 
 # ── Tạo encryption key từ machine ID (mỗi máy khác nhau) ────────────────────
@@ -60,6 +62,7 @@ def _decrypt_value(value: str) -> str:
 
 class ConfigManager:
     """Handles all configuration — sensitive fields auto-encrypted on disk."""
+    _write_lock = threading.RLock()
 
     @staticmethod
     def get_default_config_path() -> str:
@@ -86,8 +89,6 @@ class ConfigManager:
 
     # ── Public: load và tự động decrypt sensitive fields ─────────────────────
     def load(self) -> Dict[str, Any]:
-        if self._cache is not None:
-            return self._cache
         raw = self._load_raw()
         # Decrypt các field nhạy cảm
         decoded = {}
@@ -101,10 +102,14 @@ class ConfigManager:
 
     # ── Public: save — tự động encrypt sensitive fields ──────────────────────
     def save(self, data: Dict[str, Any]) -> bool:
+        with self._write_lock:
+            return self._save_locked(data)
+
+    def _save_locked(self, data: Dict[str, Any]) -> bool:
+        temporary = None
         try:
             cfg = self.load().copy()
             cfg.update(data)
-            self._cache = cfg  # Cache giữ plaintext
 
             # Encrypt trước khi ghi ra file
             to_write = {}
@@ -114,13 +119,20 @@ class ConfigManager:
                 else:
                     to_write[k] = v
 
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as f:
+            directory = os.path.dirname(os.path.abspath(self.config_path))
+            os.makedirs(directory, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as f:
+                temporary = f.name
                 json.dump(to_write, f, ensure_ascii=False, indent=2)
+            os.replace(temporary, self.config_path)
+            self._cache = cfg
             return True
         except Exception as e:
             print(f"[Config] Save error: {e}")
             return False
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.load().get(key, default)
