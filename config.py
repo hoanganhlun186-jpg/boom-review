@@ -11,7 +11,8 @@ from typing import Any, Dict
 
 # ── Fields được mã hóa (API keys, không để plaintext) ────────────────────────
 _SENSITIVE_FIELDS = {
-    "gemini_api_key", "openrouter_api_key", "gemini_keys_file", "pekka_api_key", "token",
+    "gemini_api_key", "openrouter_api_key", "gemini_keys_file", "pekka_api_key",
+    "elevenlabs_vn_api_key", "token",
 }
 
 # ── Tạo encryption key từ machine ID (mỗi máy khác nhau) ────────────────────

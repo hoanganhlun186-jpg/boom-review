@@ -6604,9 +6604,15 @@ class FullPipeline:
 
             def minor_under_target_limit(short_count: int) -> tuple:
                 block_count = len(self.ai_package.get('script_blocks', []))
-                limit = max(1, min(3, int(math.ceil(block_count * 0.03))))
+                # A couple of slightly short blocks do not materially hurt a
+                # normal-length recap; voice-fit can close those small gaps.
+                # Keep the cap at three so broad under-writing still stops.
+                limit = max(2, min(3, int(math.ceil(block_count * 0.05))))
                 ratio = short_count / max(1, block_count)
-                return bool(short_count <= limit and ratio <= 0.05), limit, ratio, block_count
+                minor = short_count <= limit and (
+                    ratio <= 0.10 or (block_count >= 20 and short_count <= 2)
+                )
+                return bool(minor), limit, ratio, block_count
 
             def save_stage(name: str, done: bool = True):
                 self.ai_package['script'] = '\n\n'.join(

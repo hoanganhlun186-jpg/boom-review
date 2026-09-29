@@ -214,10 +214,12 @@ class PekkaTests(unittest.TestCase):
         namespace = {"re": re}
         exec(compile(module, "main.py", "exec"), namespace)
         ui = namespace["VoiceUI"]()
+        ui.tts_provider = Mock()
+        ui.tts_provider.get.return_value = "Pekka"
         for language in ("Tiếng Việt", "English"):
             choices = ui.get_voice_options(language)
-            label = next(v for v in choices if "pekka:" in v)
-            self.assertEqual(ui._resolve_voice_id(label, language), label.split(" - ")[-1])
+            label = choices[0]
+            self.assertTrue(ui._resolve_voice_id(label, language).startswith("pekka:"))
         self.assertEqual(ui._resolve_voice_id("pekka:custom-ID_1"), "pekka:custom-ID_1")
         self.assertEqual(ui._resolve_voice_id("Review nữ - vi-VN-HoaiMyNeural"), "vi-VN-HoaiMyNeural")
 

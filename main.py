@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.30"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.31"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
@@ -826,13 +826,21 @@ class App(PreviewEditorMixin, QMainWindow):
         self.tts_language = QComboBox_CTK(values=["Tiếng Việt", "English"],
                                           width=120, command=self.on_tts_language_change)
         self.tts_language.set("Tiếng Việt")
-        vr1l.addWidget(self.tts_language); vr1l.addStretch()
+        vr1l.addWidget(self.tts_language)
+        vr1l.addWidget(QLabel("Nguồn:"))
+        self.tts_provider = QComboBox_CTK(
+            values=["Miễn phí / Offline", "11LABS VN", "Pekka"],
+            width=150,
+            command=self.on_tts_provider_change,
+        )
+        self.tts_provider.set("Miễn phí / Offline")
+        vr1l.addWidget(self.tts_provider); vr1l.addStretch()
         right_lay.addWidget(voice_row1)
 
         voice_row2 = QWidget()
         vr2l = QHBoxLayout(voice_row2); vr2l.setContentsMargins(2,2,2,2)
         self.voice_choice = QComboBox_CTK(values=self.get_voice_options("Tiếng Việt"), width=270)
-        self.voice_choice.set("Review nữ - vi-VN-HoaiMyNeural")
+        self.voice_choice.set("Review nữ")
         vr2l.addWidget(self.voice_choice)
         self.btn_preview_voice = QPushButton_CTK(text="🎧 Nghe thử", width=90,
                                                  fg_color="#0f766e", command=self._preview_voice_sample)
@@ -849,6 +857,19 @@ class App(PreviewEditorMixin, QMainWindow):
         self.btn_pekka_voices = QPushButton_CTK(text="Tải giọng Pekka", command=self._load_pekka_voices)
         pekka_layout.addWidget(self.btn_pekka_voices)
         right_lay.addWidget(pekka_row)
+
+        elevenlabs_vn_row = QWidget()
+        elevenlabs_vn_layout = QHBoxLayout(elevenlabs_vn_row)
+        elevenlabs_vn_layout.setContentsMargins(2, 2, 2, 2)
+        self.elevenlabs_vn_api_key = QLineEdit()
+        self.elevenlabs_vn_api_key.setPlaceholderText("API key 11LABS VN (PL_...)")
+        self.elevenlabs_vn_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        elevenlabs_vn_layout.addWidget(self.elevenlabs_vn_api_key)
+        self.btn_elevenlabs_vn_voices = QPushButton_CTK(
+            text="Tải giọng 11LABS VN", command=self._load_elevenlabs_vn_voices
+        )
+        elevenlabs_vn_layout.addWidget(self.btn_elevenlabs_vn_voices)
+        right_lay.addWidget(elevenlabs_vn_row)
 
         # Play output
         self.btn_play_output = QPushButton_CTK(text="▶ Xem thử video output",
@@ -1520,6 +1541,7 @@ class App(PreviewEditorMixin, QMainWindow):
             if cfg.get("openrouter_api_key"):
                 self.openrouter_api_key.insert(0, cfg["openrouter_api_key"])
             self.pekka_api_key.setText(str(cfg.get("pekka_api_key", "") or ""))
+            self.elevenlabs_vn_api_key.setText(str(cfg.get("elevenlabs_vn_api_key", "") or ""))
             audio_enabled = bool(cfg.get("preview_audio_enabled", True))
             self._manual_script_review.blockSignals(True)
             self._manual_script_review.setChecked(bool(cfg.get('manual_script_review', False)))
@@ -1536,11 +1558,27 @@ class App(PreviewEditorMixin, QMainWindow):
                 checkbox.setChecked(bool(cfg.get(name+"_visible", True)))
                 checkbox.blockSignals(False)
             self._pekka_voices = cfg.get("pekka_voices") or []
+            self._elevenlabs_vn_voices = cfg.get("elevenlabs_vn_voices") or []
             self.tts_language.set(cfg.get("tts_language", "Tiếng Việt"))
+            saved_voice = str(cfg.get("tts_voice", "") or "")
+            saved_provider = str(cfg.get("tts_provider", "") or "")
+            if not saved_provider:
+                if "11labsvn:" in saved_voice:
+                    saved_provider = "11LABS VN"
+                elif "pekka:" in saved_voice:
+                    saved_provider = "Pekka"
+                else:
+                    saved_provider = "Miễn phí / Offline"
+            self.tts_provider.set(saved_provider)
             self.on_tts_language_change(self.tts_language.get())
-            saved_voice = cfg.get("tts_voice", "")
-            if saved_voice in self.get_voice_options(self.tts_language.get()):
-                self.voice_choice.set(saved_voice)
+            saved_voice_id = self._resolve_voice_id(saved_voice, self.tts_language.get())
+            saved_label = next(
+                (label for label, voice_id in getattr(self, "_voice_option_map", {}).items()
+                 if voice_id == saved_voice_id),
+                "",
+            )
+            if saved_label:
+                self.voice_choice.set(saved_label)
             if cfg.get("review_style") and hasattr(self, "review_style"):
                 self._set_review_style(cfg["review_style"], save=False)
             if hasattr(self, "capcut_srt_mode"):
@@ -2723,6 +2761,30 @@ class App(PreviewEditorMixin, QMainWindow):
         from engine.pekka_tts import voice_options, voice_language_matches
         from engine.pekka_samples import bundled_voices
         language = "en" if language_label == "English" else "vi"
+        provider = self.tts_provider.get() if hasattr(self, "tts_provider") else "Miễn phí / Offline"
+        option_map = {}
+
+        def add_option(name, voice_id):
+            label = str(name or voice_id).strip()
+            base_label = label
+            number = 2
+            while label in option_map and option_map[label] != voice_id:
+                label = f"{base_label} ({number})"
+                number += 1
+            option_map[label] = voice_id
+
+        if provider == "11LABS VN":
+            items = getattr(self, "_elevenlabs_vn_voices", None) or [{
+                "id": "n_hanoi_female_nguyetnga2_book_vc",
+                "name": "Nguyệt Nga Podcast",
+            }]
+            for item in items:
+                voice_id = str(item.get("id") or item.get("voice_id") or "").strip()
+                if re.fullmatch(r"[A-Za-z0-9_-]+", voice_id):
+                    add_option(item.get("name") or item.get("voice_name") or voice_id, "11labsvn:" + voice_id)
+            self._voice_option_map = option_map
+            return list(option_map) or ["Nguyệt Nga Podcast"]
+
         pekka = voice_options(language)
         known_ids = {label.rsplit("pekka:", 1)[1] for label in pekka}
         for item in bundled_voices() + getattr(self, "_pekka_voices", []):
@@ -2730,13 +2792,24 @@ class App(PreviewEditorMixin, QMainWindow):
             if re.fullmatch(r"[A-Za-z0-9_-]+", vid) and vid not in known_ids and voice_language_matches(item, language):
                 pekka.extend(voice_options(language, [(item.get("name") or vid, vid)]))
                 known_ids.add(vid)
+        if provider == "Pekka":
+            for label in pekka:
+                match = re.search(r"pekka:([A-Za-z0-9_-]+)$", label)
+                if match:
+                    visible = label.split("·", 1)[-1].rsplit(" - pekka:", 1)[0].strip()
+                    add_option(visible, "pekka:" + match.group(1))
+            self._voice_option_map = option_map
+            return list(option_map)
+
         if language_label == "English":
-            return ["en-US-AriaNeural", "en-US-GuyNeural", "en-GB-LibbyNeural"] + pekka
+            add_option("Aria", "en-US-AriaNeural")
+            add_option("Guy", "en-US-GuyNeural")
+            add_option("Libby", "en-GB-LibbyNeural")
+            self._voice_option_map = option_map
+            return list(option_map)
         # Danh sách giọng Việt: edge-tts + Piper offline
-        base = [
-            "Review nữ - vi-VN-HoaiMyNeural",
-            "Lồng tiếng nam - vi-VN-NamMinhNeural",
-        ]
+        add_option("Review nữ", "vi-VN-HoaiMyNeural")
+        add_option("Lồng tiếng nam", "vi-VN-NamMinhNeural")
         # Thêm Piper offline nếu model có sẵn
         try:
             from engine.piper_tts import list_piper_voices, VOICE_NAMES
@@ -2746,11 +2819,38 @@ class App(PreviewEditorMixin, QMainWindow):
                     # pv = "piper:ngoc_huyen" → hiển thị "🎙 Ngọc Huyền (Offline)"
                     stem = pv.replace("piper:", "")
                     pretty = VOICE_NAMES.get(stem, stem.replace("_", " ").title())
-                    label = f"🎙 {pretty} (Offline) - {pv}"
-                    base.append(label)
+                    add_option(f"{pretty} (Offline)", pv)
         except Exception:
             pass
-        return base + pekka
+        self._voice_option_map = option_map
+        return list(option_map)
+
+    def _load_elevenlabs_vn_voices(self):
+        from engine.elevenlabs_vn_tts import fetch_voices
+        key = self.elevenlabs_vn_api_key.text().strip()
+        if not key:
+            self._show_error("Bạn chưa nhập API key 11LABS VN.")
+            return
+        self.btn_elevenlabs_vn_voices.configure(state="disabled", text="Đang tải...")
+
+        def worker():
+            try:
+                voices = fetch_voices(key)
+                def apply():
+                    self._elevenlabs_vn_voices = voices
+                    self.save_config({"elevenlabs_vn_voices": voices})
+                    self.tts_provider.set("11LABS VN")
+                    self.on_tts_language_change(self.tts_language.get())
+                    self.btn_elevenlabs_vn_voices.configure(state="normal", text="Tải giọng 11LABS VN")
+                    self._thread_safe_log(f"✓ Đã tải {len(voices)} giọng 11LABS VN.\n")
+                self.after(0, apply)
+            except Exception as exc:
+                message = str(exc)
+                def fail():
+                    self.btn_elevenlabs_vn_voices.configure(state="normal", text="Tải giọng 11LABS VN")
+                    self._show_error(message)
+                self.after(0, fail)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _load_pekka_voices(self):
         from engine.pekka_tts import fetch_voices
@@ -2766,6 +2866,7 @@ class App(PreviewEditorMixin, QMainWindow):
                 def apply():
                     self._pekka_voices = voices
                     self.save_config({"pekka_voices": voices})
+                    self.tts_provider.set("Pekka")
                     self.on_tts_language_change(self.tts_language.get())
                     self.btn_pekka_voices.configure(state="normal", text="Tải giọng Pekka")
                     self._thread_safe_log(f"✓ Đã tải {len(voices)} giọng Pekka; lọc theo ngôn ngữ đang chọn.\n")
@@ -2789,6 +2890,12 @@ class App(PreviewEditorMixin, QMainWindow):
 
     def _resolve_voice_id(self, voice_label, language_label=None):
         voice_label = (voice_label or "").strip()
+        mapped = getattr(self, "_voice_option_map", {}).get(voice_label)
+        if mapped:
+            return mapped
+        elevenlabs_vn_match = re.search(r"(?:^|\s)(11labsvn:[A-Za-z0-9_-]+)$", voice_label)
+        if elevenlabs_vn_match:
+            return elevenlabs_vn_match.group(1)
         pekka_match = re.search(r"(?:^|\s)(pekka:[A-Za-z0-9_-]+)$", voice_label)
         if pekka_match:
             return pekka_match.group(1)
@@ -2826,8 +2933,12 @@ class App(PreviewEditorMixin, QMainWindow):
         from engine.pekka_samples import bundled_sample_path
         bundled_sample = bundled_sample_path(voice_id)
         pekka_key = self.pekka_api_key.text().strip()
+        elevenlabs_vn_key = self.elevenlabs_vn_api_key.text().strip()
         if voice_id.startswith("pekka:") and not bundled_sample and not pekka_key:
             self._show_error("Bạn chưa nhập API key Pekka.")
+            return
+        if voice_id.startswith("11labsvn:") and not elevenlabs_vn_key:
+            self._show_error("Bạn chưa nhập API key 11LABS VN.")
             return
 
         # Luôn dùng câu mẫu tiếng Việt để người dùng nghe và chọn giọng
@@ -2849,6 +2960,10 @@ class App(PreviewEditorMixin, QMainWindow):
                 from engine.piper_tts import is_piper_voice, synthesize_piper
                 if bundled_sample:
                     play_path = bundled_sample
+                elif voice_id.startswith("11labsvn:"):
+                    from engine.elevenlabs_vn_tts import synthesize_11labs_vn
+                    synthesize_11labs_vn(sample_text, tmp_mp3, voice_id, api_key=elevenlabs_vn_key)
+                    play_path = tmp_mp3
                 elif voice_id.startswith("pekka:"):
                     from engine.pekka_tts import synthesize_pekka
                     synthesize_pekka(sample_text, tmp_mp3, voice_id, api_key=pekka_key)
@@ -2959,6 +3074,12 @@ class App(PreviewEditorMixin, QMainWindow):
         self.voice_choice.blockSignals(blocked)
         if not blocked:
             self.voice_choice.currentTextChanged.emit(self.voice_choice.get())
+
+    def on_tts_provider_change(self, value):
+        if hasattr(self, "voice_choice"):
+            self.on_tts_language_change(self.tts_language.get())
+        if hasattr(self, "config_manager") and self.config_manager is not None:
+            self.save_config({"tts_provider": value})
 
     def on_cut_mode_change(self, value):
         preset = getattr(self, "cut_mode_presets", {}).get(value)
@@ -4709,7 +4830,7 @@ class App(PreviewEditorMixin, QMainWindow):
                 tts_language_label = self.tts_language.get() if hasattr(self, 'tts_language') else "Tiếng Việt"
                 tts_language = "Vietnamese" if self._is_vietnamese_language(tts_language_label) else "English"
                 selected_voice = self._resolve_voice_id(self.voice_choice.get(), tts_language_label) if hasattr(self, 'voice_choice') else "vi-VN-HoaiMyNeural"
-                if self._is_vietnamese_language(tts_language_label) and not selected_voice.startswith(("vi-", "piper:", "pekka:")):
+                if self._is_vietnamese_language(tts_language_label) and not selected_voice.startswith(("vi-", "piper:", "pekka:", "11labsvn:")):
                     selected_voice = "vi-VN-HoaiMyNeural"
                 script_type = self.script_type.get() if hasattr(self, 'script_type') else "Mô-đun (Intro+Body+Outro)"
                 prebuilt_review_script = self._get_review_script_text()
@@ -4784,7 +4905,7 @@ class App(PreviewEditorMixin, QMainWindow):
                     ai.text_to_speech(script, tts_path, voice=selected_voice, rate=voice_rate)
                 )
                 self.log.insert("end", f"✓ Giọng nói hoàn thành: {chosen_voice}\n")
-                if "vi-" in chosen_voice or (chosen_voice.startswith(("pekka:", "piper:")) and self._is_vietnamese_language(tts_language_label)):
+                if "vi-" in chosen_voice or (chosen_voice.startswith(("pekka:", "piper:", "11labsvn:")) and self._is_vietnamese_language(tts_language_label)):
                     self.log.insert("end", "  → Tiếng Việt ✓\n")
                 else:
                     self.log.insert("end", f"  ⚠️ Không phải tiếng Việt, hệ thống dùng: {chosen_voice}\n")
@@ -5864,7 +5985,7 @@ Tạo JSON ngay."""
             tts_language_label = self.tts_language.get() if hasattr(self, 'tts_language') else "Tiếng Việt"
             tts_language = "Vietnamese" if self._is_vietnamese_language(tts_language_label) else "English"
             selected_voice = self._resolve_voice_id(self.voice_choice.get(), tts_language_label) if hasattr(self, 'voice_choice') else "vi-VN-HoaiMyNeural"
-            if self._is_vietnamese_language(tts_language_label) and not selected_voice.startswith(("vi-", "piper:", "pekka:")):
+            if self._is_vietnamese_language(tts_language_label) and not selected_voice.startswith(("vi-", "piper:", "pekka:", "11labsvn:")):
                 selected_voice = "vi-VN-HoaiMyNeural"
             character_focus = self.movie_name.get().strip()
             
@@ -6367,13 +6488,16 @@ Tạo JSON ngay."""
         for field, key in ((self.api_key, 'gemini_api_key'),
                            (self.api_keys_file, 'gemini_keys_file'),
                            (self.openrouter_api_key, 'openrouter_api_key'),
-                           (self.pekka_api_key, 'pekka_api_key')):
+                           (self.pekka_api_key, 'pekka_api_key'),
+                           (self.elevenlabs_vn_api_key, 'elevenlabs_vn_api_key')):
             field.textChanged.connect(
                 lambda value, config_key=key: self._save_api_setting(config_key, value))
         self.voice_choice.currentTextChanged.connect(
             lambda value: self.save_config({"tts_voice": value}))
         self.tts_language.currentTextChanged.connect(
             lambda value: self.save_config({"tts_language": value}))
+        self.tts_provider.currentTextChanged.connect(
+            lambda value: self.save_config({"tts_provider": value}))
 
     def _save_api_setting(self, key, value):
         # Save only the changed field; never log credential values.
@@ -6386,7 +6510,8 @@ Tạo JSON ngay."""
         data = self.config_manager.load()
         if getattr(self, '_shared_only', False):
             keys = {'gemini_api_key', 'gemini_keys_file', 'openrouter_api_key',
-                    'pekka_api_key', 'pekka_voices', 'tts_language', 'tts_voice',
+                    'pekka_api_key', 'pekka_voices', 'elevenlabs_vn_api_key',
+                    'elevenlabs_vn_voices', 'tts_language', 'tts_provider', 'tts_voice',
                     'review_style'}
             return {key: value for key, value in data.items() if key in keys}
         return data
@@ -7104,7 +7229,9 @@ class ProjectTabs(QMainWindow):
                 'gemini_keys_file': previous.api_keys_file.get(),
                 'openrouter_api_key': previous.openrouter_api_key.get(),
                 'pekka_api_key': previous.pekka_api_key.text(),
+                'elevenlabs_vn_api_key': previous.elevenlabs_vn_api_key.text(),
                 'tts_language': previous.tts_language.get(),
+                'tts_provider': previous.tts_provider.get(),
                 'tts_voice': previous.voice_choice.get(),
             })
         project = App(shared_only=not first)
@@ -7137,10 +7264,12 @@ class ProjectTabs(QMainWindow):
         for project in projects:
             if project is shared:
                 continue
-            for field in ('api_key', 'api_keys_file', 'openrouter_api_key', 'pekka_api_key'):
+            for field in ('api_key', 'api_keys_file', 'openrouter_api_key', 'pekka_api_key', 'elevenlabs_vn_api_key'):
                 getattr(project, field).setText(getattr(shared, field).text())
             project._pekka_voices = list(getattr(shared, '_pekka_voices', []))
+            project._elevenlabs_vn_voices = list(getattr(shared, '_elevenlabs_vn_voices', []))
             project.tts_language.set(shared.tts_language.get())
+            project.tts_provider.set(shared.tts_provider.get())
             project.on_tts_language_change(shared.tts_language.get())
             project.voice_choice.set(shared.voice_choice.get())
         self.running = True

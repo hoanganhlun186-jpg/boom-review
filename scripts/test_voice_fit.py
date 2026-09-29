@@ -143,6 +143,36 @@ class FitTests(unittest.TestCase):
                  patch.object(pipeline, '_repair_srt_alignment_final_pass'):
                 self.assertFalse(pipeline.prepare_automatic_review())
             self.assertIn('vượt ngưỡng cảnh báo nhỏ', pipeline.script_review_error)
+
+    def test_automatic_review_allows_two_short_blocks_out_of_thirty_one(self):
+        from core.full_pipeline import FullPipeline
+        with tempfile.TemporaryDirectory() as folder:
+            pipeline = FullPipeline('', folder, progress_callback=lambda m: None)
+            blocks = [
+                dict(
+                    block_id=index,
+                    text=f'Nhân vật tiếp tục diễn biến riêng của câu chuyện thứ {index}.',
+                    target_words=12,
+                )
+                for index in range(1, 32)
+            ]
+            pipeline.ai_package = dict(script_blocks=blocks)
+            with patch('engine.ai_engine.AIEngine'), \
+                 patch.object(
+                     pipeline, '_annotate_srt_alignment',
+                     side_effect=lambda package, *_: (
+                         package, {'error_count': 0, 'block_count': 31}),
+                 ), \
+                 patch.object(pipeline, '_count_duplicate_sentences_for_tts', return_value=0), \
+                 patch.object(pipeline, '_count_under_target_story_blocks', return_value=2), \
+                 patch.object(
+                     pipeline, '_repair_under_target_story_blocks',
+                     return_value=(blocks, 0, 2),
+                 ):
+                self.assertTrue(pipeline.prepare_automatic_review())
+            self.assertEqual(
+                pipeline.ai_package['automatic_review_warnings']['under_target_block_count'], 2)
+            self.assertEqual(pipeline.ai_package['voice_source'], 'automatic_review_with_warnings')
     def test_only_long_block_rewritten_and_resume_does_not_charge(self):
         with tempfile.TemporaryDirectory() as folder:
             blocks = [dict(block_id=i, text='Một hai ba bốn năm sáu.', original_start=(i-1)*10, original_end=i*10) for i in (1, 2)]

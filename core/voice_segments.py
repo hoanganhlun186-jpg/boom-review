@@ -275,6 +275,13 @@ class VoiceSegmentsGenerator:
             if duration < 0.1:
                 raise RuntimeError("Không đo được thời lượng voice Pekka.")
             return duration
+        if voice.startswith("11labsvn:"):
+            from engine.elevenlabs_vn_tts import synthesize_11labs_vn
+            await asyncio.to_thread(synthesize_11labs_vn, clean_text, output_path, voice, rate)
+            duration = _probe_audio_duration(output_path)
+            if duration < 0.1:
+                raise RuntimeError("Không đo được thời lượng voice 11LABS VN.")
+            return duration
         
         # If sanitized text becomes empty, pad it
         if len(clean_text) < 2:
