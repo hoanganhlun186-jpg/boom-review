@@ -25,6 +25,12 @@ An toàn và tự động:
 - Đã thử thực tế 3 job đồng thời với giọng Nguyệt Nga: 3/3 thành công.
 - File kiểm tra đa luồng: scripts/probe_elevenlabs_vn_parallel.py (chỉ chạy thủ công vì có tốn quota).
 
+Ngưỡng bám cảnh tự động:
+- Pipeline vẫn sửa các lỗi bám cảnh theo từng block trước khi tạo voice.
+- Nếu chỉ còn tối đa 3 block và không quá 10% tổng số block, hệ thống ghi cảnh báo rồi tiếp tục TTS.
+- Lỗi diện rộng trên 10%, câu lặp, lời kể lỗi/rỗng hoặc thiếu nội dung quá nhiều vẫn dừng an toàn.
+- Cảnh báo nhỏ đã chấp nhận được khóa theo chữ ký kịch bản; retry voice không chạy lại sửa bám cảnh từ đầu.
+
 Lưu ý:
 - Đây là API của 11labs.id.vn, không phải API ElevenLabs chính thức.
 - Mỗi khách nên dùng API key riêng. Không gửi key cá nhân kèm bản ZIP.

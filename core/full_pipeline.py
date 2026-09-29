@@ -6573,10 +6573,14 @@ class FullPipeline:
             from core.narration_guard import invalid_narration
             if (self.ai_package.get('automatic_review_signature') == review_signature()
                     and self.ai_package.get('script_editor_synced')
-                    and self.ai_package.get('voice_source') == 'automatic_review'
-                    and not self.ai_package.get('automatic_review_warnings')
+                    and self.ai_package.get('voice_source') in {
+                        'automatic_review', 'automatic_review_with_warnings'
+                    }
                     and not any(invalid_narration(b.get('text')) for b in self.ai_package.get('script_blocks', []))):
-                self._log('   🔒 Dùng lại kịch bản đã tự kiểm tra; không sửa lại khi retry voice.')
+                self._log(
+                    '   🔒 Dùng lại kịch bản đã tự kiểm tra; '
+                    'cảnh báo nhỏ đã được khóa, không sửa lại khi retry voice.'
+                )
                 return True
             self.ai_package['automatic_review'] = True
             self.ai_package['script_editor_synced'] = False
@@ -6595,11 +6599,15 @@ class FullPipeline:
                     or len(self.ai_package.get('script_blocks', []))
                     or 0
                 )
-                limit = max(1, min(5, int(math.ceil(block_count * 0.05))))
+                # Residual lexical SRT mismatches are advisory when they affect
+                # no more than 10% of a recap and at most three blocks. The
+                # validator compares Vietnamese narration with short source-SRT
+                # anchors, so a correct paraphrase can remain flagged even
+                # after repeated repair. Keep a hard cap of three: broad scene
+                # drift still stops before paid TTS.
+                limit = max(1, min(3, int(math.ceil(block_count * 0.10))))
                 ratio = error_count / max(1, block_count)
-                minor = error_count <= limit and (
-                    ratio <= 0.08 or (block_count >= 20 and error_count <= 2)
-                )
+                minor = error_count <= limit and ratio <= 0.10
                 return bool(minor), limit, ratio, block_count
 
             def minor_under_target_limit(short_count: int) -> tuple:
@@ -6655,6 +6663,12 @@ class FullPipeline:
                 self.ai_package, report = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
                 errors = int(report.get('error_count') or 0)
                 if not errors:
+                    break
+                alignment_minor_now, _, _, _ = minor_alignment_limit(errors, report)
+                if alignment_minor_now:
+                    # Stop spending repair calls once the remaining mismatch is
+                    # already inside the bounded warning range. Later duplicate,
+                    # length and invalid-narration gates still run normally.
                     break
                 if alignment_limit is None:
                     alignment_limit = errors + 2

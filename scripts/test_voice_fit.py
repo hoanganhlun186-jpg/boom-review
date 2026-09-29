@@ -124,6 +124,59 @@ class FitTests(unittest.TestCase):
                 pipeline.ai_package['automatic_review_warnings']['srt_alignment_error_count'], 1)
             self.assertEqual(pipeline.ai_package['voice_source'], 'automatic_review_with_warnings')
 
+    def test_automatic_review_allows_three_alignment_warnings_out_of_thirty_six(self):
+        from core.full_pipeline import FullPipeline
+        with tempfile.TemporaryDirectory() as folder:
+            pipeline = FullPipeline('', folder, progress_callback=lambda m: None)
+            blocks = [
+                dict(block_id=index, text=f'Nhân vật tiếp tục diễn biến riêng thứ {index}.')
+                for index in range(1, 37)
+            ]
+            pipeline.ai_package = dict(script_blocks=blocks)
+            with patch('engine.ai_engine.AIEngine'), \
+                 patch.object(
+                     pipeline,
+                     '_annotate_srt_alignment',
+                     side_effect=lambda package, *_: (
+                         package, {'error_count': 3, 'block_count': 36}),
+                 ) as annotate, \
+                 patch.object(pipeline, '_repair_srt_alignment_final_pass') as repair, \
+                 patch.object(pipeline, '_count_duplicate_sentences_for_tts', return_value=0), \
+                 patch.object(pipeline, '_count_under_target_story_blocks', return_value=0):
+                self.assertTrue(pipeline.prepare_automatic_review())
+                first_annotation_count = annotate.call_count
+                self.assertTrue(pipeline.prepare_automatic_review())
+                self.assertEqual(annotate.call_count, first_annotation_count)
+            repair.assert_not_called()
+            self.assertEqual(
+                pipeline.ai_package['automatic_review_warnings']['srt_alignment_error_count'], 3)
+            self.assertEqual(pipeline.ai_package['voice_source'], 'automatic_review_with_warnings')
+
+    def test_automatic_review_stops_repair_when_alignment_enters_safe_range(self):
+        from core.full_pipeline import FullPipeline
+        with tempfile.TemporaryDirectory() as folder:
+            pipeline = FullPipeline('', folder, progress_callback=lambda m: None)
+            blocks = [
+                dict(block_id=index, text=f'Nhân vật tiếp tục diễn biến riêng thứ {index}.')
+                for index in range(1, 37)
+            ]
+            pipeline.ai_package = dict(script_blocks=blocks)
+            counts = iter([31, 5, 4, 3, 3, 3])
+            with patch('engine.ai_engine.AIEngine'), \
+                 patch.object(
+                     pipeline,
+                     '_annotate_srt_alignment',
+                     side_effect=lambda package, *_: (
+                         package, {'error_count': next(counts), 'block_count': 36}),
+                 ), \
+                 patch.object(pipeline, '_repair_srt_alignment_final_pass') as repair, \
+                 patch.object(pipeline, '_count_duplicate_sentences_for_tts', return_value=0), \
+                 patch.object(pipeline, '_count_under_target_story_blocks', return_value=0):
+                self.assertTrue(pipeline.prepare_automatic_review())
+            self.assertEqual(repair.call_count, 3)
+            self.assertEqual(
+                pipeline.ai_package['automatic_review_warnings']['srt_alignment_error_count'], 3)
+
     def test_automatic_review_does_not_bypass_broad_alignment_failure(self):
         from core.full_pipeline import FullPipeline
         with tempfile.TemporaryDirectory() as folder:
