@@ -205,9 +205,9 @@ def _voice_timing_hint_for_block(duration: float, target_words: int = 0) -> Dict
     except Exception:
         dur = 4.0
     try:
-        max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.4") or "1.4")
+        max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5")
     except Exception:
-        max_speed = 1.4
+        max_speed = 1.5
     try:
         natural_wps = float(
             os.environ.get(
@@ -228,7 +228,7 @@ def _voice_timing_hint_for_block(duration: float, target_words: int = 0) -> Dict
         "min_words_no_silence": min_words,
         "preferred_words": preferred_words,
         "max_words_before_over_speed": max_words,
-        "timing_rule": "Ưu tiên rút lời vừa cảnh; chỉ tăng tốc nhẹ và không ép giọng đọc quá nhanh.",
+        "timing_rule": "Voice được phép dài hơn cảnh nếu nén bằng tốc độ TTS, nhưng không được ngắn hơn cảnh.",
     }
 
 

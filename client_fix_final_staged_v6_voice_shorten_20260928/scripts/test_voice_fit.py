@@ -30,27 +30,6 @@ class FitTests(unittest.TestCase):
         self.assertTrue(all('lâm động phát hiện bí mật' in b['text'].lower()
                             for b in repaired))
 
-    def test_automatic_review_detects_script_editor_near_duplicates(self):
-        from core.full_pipeline import FullPipeline
-        first = (
-            'Không yên ổn chút nào, Tô Nhã và Lưu Phi Phi bị cướp biển '
-            'bắt cóc trong lúc con thuyền trôi giữa biển.'
-        )
-        near = (
-            'Không yên ổn chút nào, Tô Nhã và Lưu Phi Phi bị cướp biển '
-            'bắt cóc khi con thuyền trôi giữa biển.'
-        )
-        blocks = [dict(block_id=5, text=first), dict(block_id=6, text=near)]
-        matches = FullPipeline._duplicate_narration_matches(blocks)
-        self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]['block_id'], 6)
-        self.assertEqual(matches[0]['duplicate_of_block'], 5)
-        self.assertEqual(matches[0]['reason'], 'near_duplicate')
-        self.assertEqual(FullPipeline._count_duplicate_sentences_for_tts(blocks), 1)
-        repaired, changed = FullPipeline._force_unique_duplicate_sentences(blocks)
-        self.assertEqual(changed, 1)
-        self.assertEqual(FullPipeline._count_duplicate_sentences_for_tts(repaired), 0)
-
     def test_chapter_budget_package_is_not_rejected_by_legacy_block_cap(self):
         from core.full_pipeline import FullPipeline
         with tempfile.TemporaryDirectory() as folder:
@@ -98,7 +77,7 @@ class FitTests(unittest.TestCase):
                 self.assertTrue(pipeline.prepare_automatic_review())
                 self.assertEqual(duplicates.call_count, 1)
 
-    def test_automatic_review_continues_when_only_alignment_warnings_remain(self):
+    def test_automatic_review_stops_when_warnings_remain_after_three_attempts(self):
         from core.full_pipeline import FullPipeline
         with tempfile.TemporaryDirectory() as folder:
             pipeline = FullPipeline('', folder, progress_callback=lambda m: None)
@@ -113,36 +92,13 @@ class FitTests(unittest.TestCase):
                  patch.object(
                      pipeline,
                      '_annotate_srt_alignment',
-                     side_effect=lambda package, *_: (package, {'error_count': 1, 'block_count': 40}),
-                 ), \
-                 patch.object(pipeline, '_repair_srt_alignment_final_pass'), \
-                 patch.object(pipeline, '_count_under_target_story_blocks', return_value=0):
-                self.assertTrue(pipeline.prepare_automatic_review())
-            self.assertEqual(duplicates.call_count, 0)
-            self.assertTrue(pipeline.ai_package['script_editor_synced'])
-            self.assertEqual(
-                pipeline.ai_package['automatic_review_warnings']['srt_alignment_error_count'], 1)
-            self.assertEqual(pipeline.ai_package['voice_source'], 'automatic_review_with_warnings')
-
-    def test_automatic_review_does_not_bypass_broad_alignment_failure(self):
-        from core.full_pipeline import FullPipeline
-        with tempfile.TemporaryDirectory() as folder:
-            pipeline = FullPipeline('', folder, progress_callback=lambda m: None)
-            pipeline.ai_package = {
-                'script_blocks': [
-                    dict(block_id=index, text=f'Nhân vật tiếp tục sự kiện riêng thứ {index}.')
-                    for index in range(1, 41)
-                ]
-            }
-            with patch('engine.ai_engine.AIEngine'), \
-                 patch.object(
-                     pipeline, '_annotate_srt_alignment',
-                     side_effect=lambda package, *_: (
-                         package, {'error_count': 8, 'block_count': 40}),
+                     side_effect=lambda package, *_: (package, {'error_count': 1}),
                  ), \
                  patch.object(pipeline, '_repair_srt_alignment_final_pass'):
                 self.assertFalse(pipeline.prepare_automatic_review())
-            self.assertIn('vượt ngưỡng cảnh báo nhỏ', pipeline.script_review_error)
+            self.assertEqual(duplicates.call_count, 0)
+            self.assertIn('còn 1 lỗi', pipeline.script_review_error)
+            self.assertIn('Bám cảnh', pipeline.script_review_error)
     def test_only_long_block_rewritten_and_resume_does_not_charge(self):
         with tempfile.TemporaryDirectory() as folder:
             blocks = [dict(block_id=i, text='Một hai ba bốn năm sáu.', original_start=(i-1)*10, original_end=i*10) for i in (1, 2)]

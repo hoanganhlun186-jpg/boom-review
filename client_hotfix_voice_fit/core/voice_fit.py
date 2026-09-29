@@ -12,10 +12,9 @@ from core.voice_timing import VoiceTimingController
 
 
 BASE_PLAYBACK_SPEED = 1.2
-DEFAULT_MAX_PLAYBACK_SPEED = 1.4
-MAX_REWRITE_ATTEMPTS = 5
-MAX_LOCAL_SHORTEN_ATTEMPTS = 3
-MAX_WORD_OVERRUN = 5
+DEFAULT_MAX_PLAYBACK_SPEED = 1.6
+MAX_REWRITE_ATTEMPTS = 3
+WORD_TOLERANCE = 10
 
 
 def _max_playback_speed():
@@ -25,17 +24,7 @@ def _max_playback_speed():
         value = DEFAULT_MAX_PLAYBACK_SPEED
     if not math.isfinite(value):
         value = DEFAULT_MAX_PLAYBACK_SPEED
-    return max(BASE_PLAYBACK_SPEED, min(value, DEFAULT_MAX_PLAYBACK_SPEED))
-
-
-def _hard_cap_text(text, max_words):
-    """Last-resort shortening that always makes progress without inventing facts."""
-    words = str(text or '').strip().split()
-    limit = max(1, min(int(max_words or 1), len(words)))
-    if limit >= len(words):
-        return ' '.join(words)
-    shortened = ' '.join(words[:limit]).rstrip(' ,;:-.!?')
-    return shortened + '.' if shortened else ''
+    return max(BASE_PLAYBACK_SPEED, min(value, 2.0))
 
 
 def _fit_with_speed(seg, bid, budget, duration, ffmpeg, probe, save, log):
@@ -100,65 +89,36 @@ def fit_voices(blocks, segments, render_blocks, scenes, ffmpeg, probe,
             if not pending:
                 attempt = int(state.get('attempts') or 0)
                 if attempt >= MAX_REWRITE_ATTEMPTS:
-                    local_attempt = int(state.get('local_shorten_attempts') or 0)
-                    if local_attempt >= MAX_LOCAL_SHORTEN_ATTEMPTS:
-                        duration = _fit_with_speed(
-                            seg, bid, budget, duration, ffmpeg, probe, save, log
-                        )
-                        changed = True
-                        break
-                    safe_words = max(
-                        1, int(len(current.split()) * budget / duration * .82)
+                    duration = _fit_with_speed(
+                        seg, bid, budget, duration, ffmpeg, probe, save, log
                     )
-                    candidate = _hard_cap_text(current, safe_words)
-                    if not candidate or len(candidate.split()) >= len(current.split()):
-                        duration = _fit_with_speed(
-                            seg, bid, budget, duration, ffmpeg, probe, save, log
-                        )
-                        changed = True
-                        break
-                    state['local_shorten_attempts'] = local_attempt + 1
-                    log(
-                        f'   Block {bid}: AI sai giới hạn '
-                        f'{MAX_REWRITE_ATTEMPTS} lần; tự rút còn '
-                        f'{len(candidate.split())} từ '
-                        f'({local_attempt + 1}/{MAX_LOCAL_SHORTEN_ATTEMPTS}).'
-                    )
-                    name = hashlib.sha256(candidate.encode()).hexdigest()[:16]
-                    path = str(Path(seg['original_audio_path']).parent / f'fit_{bid}_{name}.mp3')
-                    pending = dict(text=candidate, path=path, local_fallback=True)
-                    state['pending'] = pending
-                    save()
+                    changed = True
+                    break
 
-                if not pending:
-                    target_words = max(1, int(len(current.split()) * budget / duration * .85))
-                    minimum_words = 1
-                    maximum_words = target_words + MAX_WORD_OVERRUN
-                    log(
-                        f'   Block {bid}: voice {duration:.2f}s / visual {budget:.2f}s; '
-                        f'target at most {maximum_words} words (prefer {target_words}), '
-                        f'attempt {attempt + 1}/{MAX_REWRITE_ATTEMPTS}'
-                    )
-                    state['attempts'] = attempt + 1
+                target_words = max(1, int(len(current.split()) * budget / duration * .90))
+                minimum_words = max(1, target_words - WORD_TOLERANCE)
+                maximum_words = target_words + WORD_TOLERANCE
+                log(
+                    f'   ✂️ Block {bid}: voice {duration:.2f}s / hình {budget:.2f}s; '
+                    f'mục tiêu {target_words} từ (chấp nhận {minimum_words}-{maximum_words}), '
+                    f'lần {attempt + 1}/{MAX_REWRITE_ATTEMPTS}'
+                )
+                state['attempts'] = attempt + 1
+                save()
+                candidate = rewrite(current, target_words, block).strip()
+                candidate_words = len(candidate.split())
+                if (
+                    invalid_narration(candidate)
+                    or candidate_words >= len(current.split())
+                    or not minimum_words <= candidate_words <= maximum_words
+                ):
                     save()
-                    candidate = rewrite(current, target_words, block).strip()
-                    candidate_words = len(candidate.split())
-                    if (
-                        invalid_narration(candidate)
-                        or candidate_words >= len(current.split())
-                        or candidate_words > maximum_words
-                    ):
-                        log(
-                            f'   Block {bid}: rejected rewrite '
-                            f'({candidate_words} words; max {maximum_words}).'
-                        )
-                        save()
-                        continue
-                    name = hashlib.sha256(candidate.encode()).hexdigest()[:16]
-                    path = str(Path(seg['original_audio_path']).parent / f'fit_{bid}_{name}.mp3')
-                    pending = dict(text=candidate, path=path)
-                    state['pending'] = pending
-                    save()
+                    continue
+                name = hashlib.sha256(candidate.encode()).hexdigest()[:16]
+                path = str(Path(seg['original_audio_path']).parent / f'fit_{bid}_{name}.mp3')
+                pending = dict(text=candidate, path=path)
+                state['pending'] = pending
+                save()
 
             path = pending['path']
             if not os.path.exists(path) or probe(path) <= 0:
@@ -184,8 +144,12 @@ def fit_voices(blocks, segments, render_blocks, scenes, ffmpeg, probe,
             changed = True
             save()
 
-            # Measure each accepted rewrite. If it remains long, shorten the new
-            # text again; playback speed is only the final limited fallback.
-            if duration <= budget + .04:
-                break
+            # A valid rewrite within target ±10 words is enough. If its measured
+            # voice is still longer than the image, fit this block by speed instead
+            # of asking the API to rewrite the same sentence repeatedly.
+            if duration > budget + .04:
+                duration = _fit_with_speed(
+                    seg, bid, budget, duration, ffmpeg, probe, save, log
+                )
+            break
     return changed

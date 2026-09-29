@@ -4248,58 +4248,8 @@ class FullPipeline:
         return result, changed
 
     @staticmethod
-    def _duplicate_narration_matches(script_blocks: list) -> list:
-        """Return duplicate blocks using the same gates as Script Editor."""
-        def normalized(value: Any) -> str:
-            return " ".join(re.findall(
-                r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+",
-                str(value or "").lower(),
-            ))
-
-        def sentences(value: Any) -> set:
-            return {
-                item
-                for part in re.split(r"[.!?;:\n]+", str(value or ""))
-                if len((item := normalized(part)).split()) >= 8
-            }
-
-        previous = []
-        matches = []
-        for index, block in enumerate(script_blocks or [], 1):
-            if not isinstance(block, dict):
-                continue
-            try:
-                bid = int(block.get('block_id') or block.get('book_id') or index)
-            except Exception:
-                bid = index
-            text = normalized(block.get('text') or '')
-            tokens = set(text.split())
-            text_sentences = sentences(block.get('text') or '')
-            if text:
-                for previous_id, previous_text, previous_tokens, previous_sentences in previous:
-                    reason = ''
-                    if text == previous_text:
-                        reason = 'exact'
-                    else:
-                        union = tokens | previous_tokens
-                        similarity = len(tokens & previous_tokens) / max(1, len(union))
-                        if min(len(tokens), len(previous_tokens)) >= 12 and similarity >= 0.86:
-                            reason = 'near_duplicate'
-                        elif text_sentences & previous_sentences:
-                            reason = 'repeated_sentence'
-                    if reason:
-                        matches.append({
-                            'block_id': bid,
-                            'duplicate_of_block': previous_id,
-                            'reason': reason,
-                        })
-                        break
-                previous.append((bid, text, tokens, text_sentences))
-        return matches
-
-    @classmethod
-    def _count_duplicate_sentences_for_tts(cls, script_blocks: list) -> int:
-        """Count duplicate narration blocks, matching the Script Editor gate."""
+    def _count_duplicate_sentences_for_tts(script_blocks: list) -> int:
+        """Count repeated narration sentences without changing the script."""
         def _fold(value: Any) -> str:
             normalized = unicodedata.normalize("NFKD", str(value or ""))
             no_marks = "".join(ch for ch in normalized if not unicodedata.combining(ch))
@@ -4324,28 +4274,21 @@ class FullPipeline:
                 parts = re.split(r"\s*[;；]\s*", str(text or "").strip())
             return [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
 
-        duplicate_blocks = {
-            int(item.get('block_id') or 0)
-            for item in cls._duplicate_narration_matches(script_blocks)
-        }
         seen = set()
-        for index, block in enumerate(script_blocks or [], 1):
+        count = 0
+        for block in script_blocks or []:
             if not isinstance(block, dict):
                 continue
-            try:
-                bid = int(block.get('block_id') or block.get('book_id') or index)
-            except Exception:
-                bid = index
             local = set()
             for sentence in _sentences(block.get("text") or ""):
                 signature = _sig(sentence)
                 if not signature:
                     continue
                 if signature in local or signature in seen:
-                    duplicate_blocks.add(bid)
+                    count += 1
                 local.add(signature)
             seen.update(local)
-        return len(duplicate_blocks)
+        return count
 
     @staticmethod
     def _count_under_target_story_blocks(script_blocks: list) -> int:
@@ -4405,7 +4348,6 @@ class FullPipeline:
             "Khi hậu quả của sự việc dần hiện rõ,",
         ]
         seen = set()
-        seen_blocks = []
         changed = 0
         output = []
         duplicate_index = 0
@@ -4414,25 +4356,6 @@ class FullPipeline:
                 output.append(block)
                 continue
             item = dict(block)
-            block_text = str(item.get('text') or '')
-            normalized_block = " ".join(re.findall(
-                r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+", block_text.lower()))
-            block_tokens = set(normalized_block.split())
-            block_sentences = {
-                normalized
-                for part in re.split(r"[.!?;:\n]+", block_text)
-                if len((normalized := " ".join(re.findall(
-                    r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+", part.lower()))).split()) >= 8
-            }
-            block_duplicate = False
-            for previous_text, previous_tokens, previous_sentences in seen_blocks:
-                union = block_tokens | previous_tokens
-                similarity = len(block_tokens & previous_tokens) / max(1, len(union))
-                if (normalized_block == previous_text
-                        or (min(len(block_tokens), len(previous_tokens)) >= 12 and similarity >= 0.86)
-                        or bool(block_sentences & previous_sentences)):
-                    block_duplicate = True
-                    break
             rewritten = []
             local = set()
             block_changed = False
@@ -4452,32 +4375,10 @@ class FullPipeline:
                 rewritten.append(sentence)
                 if sig:
                     local.add(sig)
-            if block_duplicate and not block_changed and rewritten:
-                cycle, offset = divmod(duplicate_index, len(transitions))
-                prefix = transitions[offset]
-                if cycle:
-                    second = transitions[cycle % len(transitions)]
-                    prefix = f"{prefix.rstrip(',')}; {second[:1].lower() + second[1:]}"
-                duplicate_index += 1
-                rewritten[0] = f"{prefix} {rewritten[0][:1].lower() + rewritten[0][1:]}"
-                changed += 1
-                block_changed = True
             seen.update(local)
             if block_changed and rewritten:
                 item["text"] = " ".join(rewritten).strip()
                 item["dedupe_anchor_preserving_rewrite"] = True
-            final_text = str(item.get('text') or '')
-            final_normalized = " ".join(re.findall(
-                r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+", final_text.lower()))
-            final_tokens = set(final_normalized.split())
-            final_sentences = {
-                normalized
-                for part in re.split(r"[.!?;:\n]+", final_text)
-                if len((normalized := " ".join(re.findall(
-                    r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+", part.lower()))).split()) >= 8
-            }
-            if final_normalized:
-                seen_blocks.append((final_normalized, final_tokens, final_sentences))
             output.append(item)
         return output, changed
 
@@ -4546,15 +4447,6 @@ class FullPipeline:
                         pass
 
         payload = []
-        duplicate_matches = {
-            int(item.get('block_id') or 0): item
-            for item in self._duplicate_narration_matches(script_blocks)
-        }
-        text_by_id = {
-            _id(block, index): str(block.get('text') or '').strip()
-            for index, block in enumerate(script_blocks or [], 1)
-            if isinstance(block, dict)
-        }
         seen_global = set()
         duplicate_sentence_count = 0
         for index, block in enumerate(script_blocks, 1):
@@ -4572,12 +4464,6 @@ class FullPipeline:
                     duplicates.append(sentence[:240])
                 local_seen.add(sig)
             seen_global.update(local_seen)
-            duplicate_match = duplicate_matches.get(bid)
-            if duplicate_match and not duplicates:
-                duplicates.append(
-                    'Toàn block gần trùng với block '
-                    + str(duplicate_match.get('duplicate_of_block') or '')
-                )
             if not duplicates:
                 continue
             duplicate_sentence_count += len(duplicates)
@@ -4586,11 +4472,6 @@ class FullPipeline:
                 "block_id": bid,
                 "current_text": text[:1400],
                 "duplicate_sentences_to_replace": duplicates,
-                "duplicate_of_block": (
-                    duplicate_match.get('duplicate_of_block') if duplicate_match else None),
-                "must_not_repeat_text": text_by_id.get(
-                    int(duplicate_match.get('duplicate_of_block') or 0), '')[:1400]
-                    if duplicate_match else '',
                 "target_words": rb.get("target_words") or block.get("target_words") or 0,
                 "duration_seconds": rb.get("duration") or block.get("duration_hint_seconds") or 4.0,
                 "srt_reference": str(
@@ -5375,24 +5256,10 @@ class FullPipeline:
                 "voice_id": self.voice,
                 "mode": "recap2_scene_anchored" if self._recap2_beat_mode_enabled() else "scene_pinned",
                 "min_voice_speed": float(os.environ.get("AUTORECAP_MIN_VOICE_SPEED", "1.0") or "1.0"),
-                "max_voice_speed": float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.4") or "1.4"),
+                "max_voice_speed": float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5"),
                 "continuous_voice": str(os.environ.get("AUTORECAP_CONTINUOUS_VOICE", continuous_default) or continuous_default).strip().lower()
                 not in {"0", "false", "no", "off"},
             }
-
-            def _timing_policy_matches(cached_policy):
-                if cached_policy == timing_policy:
-                    return True
-                if not actual_voice_timeline or not isinstance(cached_policy, dict):
-                    return False
-                # Actual-timeline segments keep raw TTS here; the playback ceiling
-                # is applied later by VOICE_CONCAT. A ceiling-only change must not
-                # regenerate every cached voice block.
-                cached_comparable = dict(cached_policy)
-                current_comparable = dict(timing_policy)
-                cached_comparable.pop("max_voice_speed", None)
-                current_comparable.pop("max_voice_speed", None)
-                return cached_comparable == current_comparable
 
             try:
                 from utils.helpers import FFmpegUtils
@@ -5408,7 +5275,7 @@ class FullPipeline:
                 # ratio = tts_dur / target_dur ; >1 = voice dai hon canh -> nen nhanh hon
                 # Gioi han toc do toi da mac dinh 1.5x de giong khong bi doc qua nhanh.
                 min_speed = float(os.environ.get("AUTORECAP_MIN_VOICE_SPEED", "1.0") or "1.0")
-                max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.4") or "1.4")
+                max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5")
                 ratio = max(max(1.0, min_speed), min(ratio, max(1.0, max_speed)))
                 return f"atempo={ratio:.6f}"
 
@@ -5442,7 +5309,7 @@ class FullPipeline:
                 except Exception:
                     pct = 0.0
                 min_speed = float(os.environ.get("AUTORECAP_MIN_VOICE_SPEED", "1.0") or "1.0")
-                max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.4") or "1.4")
+                max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5")
                 min_pct = max(0.0, (min_speed - 1.0) * 100.0)
                 max_pct = max(0.0, (max_speed - 1.0) * 100.0)
                 pct = max(min_pct, min(max_pct, pct))
@@ -5765,20 +5632,6 @@ class FullPipeline:
                                 "duplicate_script_blocks",
                                 "empty_script_blocks",
                             }
-                            if self.ai_package.get('automatic_review'):
-                                serious_types.update({
-                                    "missing_script_blocks",
-                                    "script_render_block_mismatch",
-                                    "ai_quota_fallback_used",
-                                    "vietnamese_diacritics_missing",
-                                    "evidence_coverage_too_low",
-                                    "too_many_weak_context_blocks",
-                                    "critical_scene_anchor_missing",
-                                    "scene_mapping_too_many_warnings",
-                                    "scene_retrieval_mismatch_too_high",
-                                    "scene_retrieval_too_weak",
-                                    "poor_context_without_visual_rescue",
-                                })
                             if not actual_voice_timeline:
                                 serious_types.add("too_many_under_target_blocks")
                             serious_errors = [
@@ -6243,7 +6096,7 @@ class FullPipeline:
                         and os.path.exists(cached_seg.get("audio_path"))
                         and os.path.getsize(cached_seg.get("audio_path")) > 0
                         and cached_seg.get("timing_status") in ("ok", "unknown", "accepted_editor", "recap2_scene_anchored")
-                        and _timing_policy_matches(cached_seg.get("timing_policy"))
+                        and cached_seg.get("timing_policy") == timing_policy
                     ):
                         voice_segments.append(cached_seg)
                         skipped += 1
@@ -6348,7 +6201,7 @@ class FullPipeline:
                             words = len(clean.split())
                             natural_dur = words / 2.5  # 2.5 từ/giây tự nhiên
                             opt_ratio = natural_dur / target_dur
-                            max_voice_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.4") or "1.4")
+                            max_voice_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5")
                             max_rate_pct = max(0.0, (max_voice_speed - 1.0) * 100.0)
                             opt_rate_pct = max(0.0, min(max_rate_pct, (opt_ratio - 1.0) * 100.0))
                             opt_rate = _clamp_tts_rate(f"+{opt_rate_pct:.0f}%")
@@ -6581,32 +6434,12 @@ class FullPipeline:
             self.ai_package['automatic_review'] = True
             self.ai_package['script_editor_synced'] = False
             self.ai_package['script_editor_locked'] = False
-            self.ai_package.pop('automatic_review_warnings', None)
             for block in self.ai_package.get('script_blocks', []):
                 block['script_editor_locked'] = False
                 block['script_editor_synced'] = False
             ai = AIEngine(api_key=self.gemini_api_key)
             stage_attempts = 3
             stage_state = dict(self.ai_package.get('automatic_review_stages') or {})
-
-            def minor_alignment_limit(error_count: int, report: dict) -> tuple:
-                block_count = int(
-                    (report or {}).get('block_count')
-                    or len(self.ai_package.get('script_blocks', []))
-                    or 0
-                )
-                limit = max(1, min(5, int(math.ceil(block_count * 0.05))))
-                ratio = error_count / max(1, block_count)
-                minor = error_count <= limit and (
-                    ratio <= 0.08 or (block_count >= 20 and error_count <= 2)
-                )
-                return bool(minor), limit, ratio, block_count
-
-            def minor_under_target_limit(short_count: int) -> tuple:
-                block_count = len(self.ai_package.get('script_blocks', []))
-                limit = max(1, min(3, int(math.ceil(block_count * 0.03))))
-                ratio = short_count / max(1, block_count)
-                return bool(short_count <= limit and ratio <= 0.05), limit, ratio, block_count
 
             def save_stage(name: str, done: bool = True):
                 self.ai_package['script'] = '\n\n'.join(
@@ -6671,30 +6504,10 @@ class FullPipeline:
             self.ai_package, report = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
             errors = int(report.get('error_count') or 0)
             if errors:
-                alignment_minor, alignment_soft_limit, alignment_ratio, alignment_blocks = minor_alignment_limit(
-                    errors, report)
-                if not alignment_minor:
-                    raise RuntimeError(
-                        f'Bám cảnh còn {errors}/{alignment_blocks} block '
-                        f'({alignment_ratio:.1%}) sau {alignment_attempt} lượt, '
-                        f'vượt ngưỡng cảnh báo nhỏ {alignment_soft_limit} block; chưa gửi TTS.')
-                # Alignment is a bounded quality gate. A few stubborn semantic
-                # mismatches are not proof that the narration is unusable, and
-                # must not prevent the later duplicate/length/invalid-text gates
-                # from running. Keep the detailed report for customer review.
-                self.ai_package['automatic_review_warnings'] = {
-                    **dict(self.ai_package.get('automatic_review_warnings') or {}),
-                    'srt_alignment_error_count': errors,
-                    'srt_alignment_repair_attempts': alignment_attempt,
-                }
-                save_stage('scene_alignment', False)
-                self._log(
-                    f'   ⚠️ [2/4 BÁM CẢNH] Còn {errors} cảnh báo sau '
-                    f'{alignment_attempt} lượt — giữ báo cáo và tiếp tục các cổng an toàn.'
-                )
-            else:
-                save_stage('scene_alignment')
-                self._log('   ✅ [2/4 BÁM CẢNH] Đã đạt — khóa kết quả, không sửa lại.')
+                raise RuntimeError(
+                    f'Bám cảnh không giảm thêm sau {alignment_attempt} lượt, còn {errors} lỗi; chưa gửi TTS.')
+            save_stage('scene_alignment')
+            self._log('   ✅ [2/4 BÁM CẢNH] Đã đạt — khóa kết quả, không sửa lại.')
 
             duplicates = self._count_duplicate_sentences_for_tts(self.ai_package.get('script_blocks', []))
             duplicate_attempt = 0
@@ -6743,8 +6556,6 @@ class FullPipeline:
                 accepted = 0
                 rejected = 0
                 current_duplicates = duplicates
-                baseline_alignment_errors = int(
-                    SrtAlignmentValidator.validate(accepted_blocks, self.render_blocks).get('error_count') or 0)
                 for bid, candidate in candidates:
                     trial_blocks = copy.deepcopy(accepted_blocks)
                     trial_blocks[accepted_by_id[bid]] = copy.deepcopy(candidate)
@@ -6754,12 +6565,11 @@ class FullPipeline:
                         1 for block in trial_blocks
                         if isinstance(block, dict) and invalid_narration(block.get('text')))
                     trial_duplicates = self._count_duplicate_sentences_for_tts(trial_blocks)
-                    if regressed > baseline_alignment_errors or invalid or trial_duplicates >= current_duplicates:
+                    if regressed or invalid or trial_duplicates >= current_duplicates:
                         rejected += 1
                         continue
                     accepted_blocks = trial_blocks
                     current_duplicates = trial_duplicates
-                    baseline_alignment_errors = regressed
                     accepted += 1
 
                 self.ai_package = snapshot
@@ -6789,11 +6599,7 @@ class FullPipeline:
                     if invalid_narration(block.get('text')))
                 forced_remaining = self._count_duplicate_sentences_for_tts(
                     self.ai_package.get('script_blocks', []))
-                baseline_errors = int(
-                    SrtAlignmentValidator.validate(
-                        snapshot.get('script_blocks', []), self.render_blocks
-                    ).get('error_count') or 0)
-                if forced_errors > baseline_errors or forced_invalid or forced_remaining:
+                if forced_errors or forced_invalid or forced_remaining:
                     self.ai_package = snapshot
                     self._log(
                         f'   ↩️ [3/4 CÂU LẶP] Bản sửa neo-cảnh cuối không đạt: '
@@ -6865,8 +6671,6 @@ class FullPipeline:
                 rejected_alignment = 0
                 rejected_duplicate = 0
                 rejected_invalid = 0
-                baseline_alignment_errors = int(
-                    SrtAlignmentValidator.validate(accepted_blocks, self.render_blocks).get('error_count') or 0)
                 for bid, candidate in candidates:
                     trial_blocks = copy.deepcopy(accepted_blocks)
                     trial_blocks[accepted_by_id[bid]] = copy.deepcopy(candidate)
@@ -6876,13 +6680,12 @@ class FullPipeline:
                     invalid = sum(
                         1 for block in trial_blocks
                         if isinstance(block, dict) and invalid_narration(block.get('text')))
-                    if regressed > baseline_alignment_errors or duplicate_regression or invalid:
-                        rejected_alignment += int(regressed > baseline_alignment_errors)
+                    if regressed or duplicate_regression or invalid:
+                        rejected_alignment += int(bool(regressed))
                         rejected_duplicate += int(bool(duplicate_regression))
                         rejected_invalid += int(bool(invalid))
                         continue
                     accepted_blocks = trial_blocks
-                    baseline_alignment_errors = regressed
                     accepted += 1
 
                 self.ai_package = snapshot
@@ -6903,21 +6706,9 @@ class FullPipeline:
                              f' — không giảm {under_stalled}/2'))
                 save_stage('under_target_blocks', not under_target)
             if under_target:
-                under_minor, under_soft_limit, under_ratio, under_blocks = minor_under_target_limit(under_target)
-                if not under_minor:
-                    raise RuntimeError(f'Block thiếu chữ không giảm thêm sau {under_attempt} lượt, '
-                                       f'còn {under_target}/{under_blocks} block ({under_ratio:.1%}), '
-                                       f'vượt ngưỡng cảnh báo nhỏ {under_soft_limit} block; chưa gửi TTS.')
-                self.ai_package['automatic_review_warnings'] = {
-                    **dict(self.ai_package.get('automatic_review_warnings') or {}),
-                    'under_target_block_count': under_target,
-                    'under_target_repair_attempts': under_attempt,
-                }
-                save_stage('under_target_blocks', False)
-                self._log(
-                    f'   ⚠️ [4/4 THIẾU CHỮ] Còn {under_target}/{under_blocks} block hơi ngắn '
-                    '— tỷ lệ nhỏ, timing/voice-fit sẽ xử lý.'
-                )
+                raise RuntimeError(f'Block thiếu chữ không giảm thêm sau {under_attempt} lượt, '
+                                   f'còn {under_target} block; '
+                                   'các kết quả đã đạt được giữ nguyên và chưa gửi TTS.')
 
             self.ai_package, final_report = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
             errors = int(final_report.get('error_count') or 0)
@@ -6925,8 +6716,7 @@ class FullPipeline:
             under_target = self._count_under_target_story_blocks(self.ai_package.get('script_blocks', []))
             invalid = sum(1 for block in self.ai_package.get('script_blocks', [])
                           if invalid_narration(block.get('text')))
-            under_minor, under_soft_limit, under_ratio, under_blocks = minor_under_target_limit(under_target)
-            if duplicates or invalid or (under_target and not under_minor):
+            if errors or duplicates or under_target or invalid:
                 raise RuntimeError(f'Kiểm tra cuối chưa đạt: {duplicates} câu lặp, {under_target} block thiếu chữ, '
                                    f'{errors} lỗi bám cảnh, {invalid} lỗi lời kể; chưa gửi TTS.')
 
@@ -6934,27 +6724,7 @@ class FullPipeline:
             self._log('   ✅ [4/4 THIẾU CHỮ] Đã đạt — khóa kết quả.')
             self.ai_package['script_editor_synced'] = True
             self.ai_package['script_editor_locked'] = True
-            if under_target:
-                self.ai_package['automatic_review_warnings'] = {
-                    **dict(self.ai_package.get('automatic_review_warnings') or {}),
-                    'under_target_block_count': under_target,
-                    'under_target_repair_attempts': under_attempt,
-                }
-            if errors:
-                self.ai_package['automatic_review_warnings'] = {
-                    **dict(self.ai_package.get('automatic_review_warnings') or {}),
-                    'srt_alignment_error_count': errors,
-                    'srt_alignment_repair_attempts': alignment_attempt,
-                }
-                self._log(
-                    f'   ⚠️ Kiểm tra cuối còn {errors} cảnh báo bám cảnh; '
-                    'kịch bản hợp lệ nên tiếp tục tạo voice.'
-                )
-            self.ai_package['voice_source'] = (
-                'automatic_review_with_warnings'
-                if self.ai_package.get('automatic_review_warnings')
-                else 'automatic_review'
-            )
+            self.ai_package['voice_source'] = 'automatic_review'
             for block in self.ai_package['script_blocks']:
                 block['script_editor_locked'] = True
                 block['script_editor_synced'] = True
@@ -6999,7 +6769,7 @@ class FullPipeline:
             continuous_voice = True
             max_voice_gap = 0.0
         voice_concat_policy = {
-            "version": 10,
+            "version": 9,
             "playback_speed": 1.2,
             "actual_voice_timeline": actual_voice_timeline,
             "continuous_voice": bool(continuous_voice),
@@ -7051,8 +6821,8 @@ class FullPipeline:
                     return fit_ai
                 def rewrite_fit(text, words, block):
                     prompt = (
-                        f'Rút gọn lời kể phim sau còn tối đa {words + 5} từ để khớp thời gian cảnh; '
-                        f'ưu tiên khoảng {words} từ và được phép ngắn hơn nếu câu vẫn trọn nghĩa. '
+                        f'Rút gọn lời kể phim sau về khoảng {words} từ để khớp thời gian cảnh; '
+                        f'chấp nhận chênh lệch tối đa 10 từ ({max(1, words - 10)}-{words + 10} từ). '
                         'Giữ đúng nhân vật, hành động chính, quan hệ nhân quả và thứ tự sự kiện. '
                         'Không thêm tình tiết. Ưu tiên sự kiện chính; bỏ tính từ, câu nhắc lại và CTA quảng bá nếu không đủ chỗ. '
                         'Số từ tính theo khoảng trắng, mỗi tiếng Việt cách nhau được tính một từ. '
@@ -8545,10 +8315,7 @@ class FullPipeline:
             if not proceed:
                 error = getattr(self, 'script_review_error', '')
                 if error:
-                    if self.ai_package.get('automatic_review'):
-                        self._log(f"❌ Tự duyệt kịch bản không hoàn tất: {error}. Pipeline dừng trước khi tạo voice.")
-                    else:
-                        self._log(f"❌ Không mở được Script Editor: {error}. Pipeline dừng trước khi tạo voice.")
+                    self._log(f"❌ Không mở được Script Editor: {error}. Pipeline dừng trước khi tạo voice.")
                 else:
                     self._log("⏸️ Pipeline dừng tại Script Review: chưa xác nhận tạo voice.")
                 return False

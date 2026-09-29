@@ -1,0 +1,106 @@
+diff --git a/core/full_pipeline.py b/core/full_pipeline.py
+--- a/core/full_pipeline.py
++++ b/core/full_pipeline.py
+@@ -701,6 +701,23 @@ class FullPipeline:
+         # Giữ beat dài hơn để recap liền mạch, tránh chia quá nhỏ làm hụt voice.
+         return max(30, min(80, int(target_duration / 12.0) + 2))
+ 
++    def _uses_modern_segmented_script(self, package: Optional[dict] = None) -> bool:
++        """Return True for packages whose blocks are intentional story segments.
++
++        Chapter-budget/map-reduce output can legitimately contain more than the
++        old beat cap. That cap only rejects legacy scene-per-block caches.
++        """
++        package = package if isinstance(package, dict) else self.ai_package
++        strategy = str(package.get("script_block_strategy") or "").strip()
++        if strategy == "chapter_budget_story_segment":
++            return True
++        return any(
++            isinstance(block, dict)
++            and str(block.get("script_block_strategy") or "").strip()
++            == "chapter_budget_story_segment"
++            for block in (package.get("script_blocks") or [])
++        )
++
+     def _recap2_beat_mode_enabled(self) -> bool:
+         """Use RECAP2-style beat blocks instead of tiny scene-by-scene script blocks."""
+         return str(os.environ.get("AUTORECAP_RECAP2_BEAT_MODE", "1") or "1").strip().lower() not in {
+@@ -2776,7 +2793,10 @@ class FullPipeline:
+                         and cached_planned_duration
+                         and abs(float(planned_cache_duration) - cached_planned_duration) > 1.0
+                     )
+-                    too_many_blocks = script_block_count > self._max_ai_blocks(planned_cache_duration or self.cut_duration) * 2
++                    too_many_blocks = (
++                        not self._uses_modern_segmented_script(self.ai_package)
++                        and script_block_count > self._max_ai_blocks(planned_cache_duration or self.cut_duration) * 2
++                    )
+                     missing_diacritics = bool(vi_report.get("needs_repair"))
+                     source_duration = float(self.metadata.get("duration_s") or 0.0)
+                     source_coverage_end = self._render_blocks_source_end(self.render_blocks)
+@@ -4955,7 +4975,11 @@ class FullPipeline:
+             if not full_script and not script_blocks:
+                 self._step_fail("VOICE_SEGMENTS", "Không có kịch bản")
+                 return False
+-            if script_blocks and len(script_blocks) > self._max_ai_blocks(self.cut_duration) * 2:
++            if (
++                script_blocks
++                and not self._uses_modern_segmented_script(self.ai_package)
++                and len(script_blocks) > self._max_ai_blocks(self.cut_duration) * 2
++            ):
+                 self._step_fail(
+                     "VOICE_SEGMENTS",
+                     f"AI package cu qua nhieu block ({len(script_blocks)}). Hay chay lai AI_FULL de gom book truoc khi tao voice.",
+@@ -5368,7 +5392,14 @@ class FullPipeline:
+                         elif real_errors:
+                             # Trong auto-pipeline (không có Script Editor): bỏ qua
+                             # too_many_under_target_blocks vì timing repair / atempo sẽ xử lý.
+-                            _auto_bypass = {"too_many_under_target_blocks", "some_under_target_blocks"}
++                            _auto_bypass = {
++                                "too_many_under_target_blocks",
++                                "some_under_target_blocks",
++                                # Automatic review already made three bounded
++                                # repair passes. Let the final dedupe pass below
++                                # run instead of stopping before TTS reaches it.
++                                "duplicate_script_blocks",
++                            }
+                             _blocking = [
+                                 item for item in real_errors
+                                 if str(item.get("type") or "") not in _auto_bypass
+@@ -6190,7 +6221,36 @@ class FullPipeline:
+                     with open(os.path.join(self.output_dir, 'ai_package.json'), 'w', encoding='utf-8') as handle:
+                         json.dump(self.ai_package, handle, ensure_ascii=False, indent=2)
+                     return True
+-            raise RuntimeError('Tự sửa kịch bản 3 lượt vẫn chưa đạt; chưa gửi TTS để tránh tốn phí.')
++            # Duplicate/alignment checks are quality signals, not proof that TTS
++            # input is unusable. Continue after bounded repairs when every block
++            # still has valid narration; empty/invalid narration remains fatal.
++            remaining_invalid = [
++                str(block.get('block_id') or index + 1)
++                for index, block in enumerate(self.ai_package.get('script_blocks', []))
++                if not str(block.get('text') or '').strip() or invalid_narration(block.get('text'))
++            ]
++            if remaining_invalid:
++                raise RuntimeError(
++                    'Kịch bản còn block rỗng hoặc lời kể không hợp lệ sau 3 lượt: '
++                    + ', '.join(remaining_invalid[:12])
++                )
++            warning = {
++                'duplicate_sentence_count': int(duplicates or 0),
++                'srt_alignment_error_count': int(errors or 0),
++                'repair_attempts': 3,
++            }
++            self.ai_package['automatic_review_warnings'] = warning
++            self.ai_package['automatic_review_signature'] = review_signature()
++            self.ai_package['voice_source'] = 'automatic_review_with_warnings'
++            with open(os.path.join(self.output_dir, 'ai_package.json'), 'w', encoding='utf-8') as handle:
++                json.dump(self.ai_package, handle, ensure_ascii=False, indent=2)
++            self._log(
++                '   ⚠️ Tự kiểm tra còn cảnh báo sau 3 lượt '
++                f"({warning['duplicate_sentence_count']} câu lặp, "
++                f"{warning['srt_alignment_error_count']} lỗi bám cảnh) -> tiếp tục tạo voice; "
++                'các cổng block rỗng/lời kể lỗi vẫn được giữ.'
++            )
++            return True
+         except Exception as error:
+             self.script_review_error = str(error)
+             self._log(f'   ❌ Tự sửa kịch bản chưa thành công: {error}')

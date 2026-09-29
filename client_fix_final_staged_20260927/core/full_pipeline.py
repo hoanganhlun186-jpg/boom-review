@@ -4248,58 +4248,8 @@ class FullPipeline:
         return result, changed
 
     @staticmethod
-    def _duplicate_narration_matches(script_blocks: list) -> list:
-        """Return duplicate blocks using the same gates as Script Editor."""
-        def normalized(value: Any) -> str:
-            return " ".join(re.findall(
-                r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+",
-                str(value or "").lower(),
-            ))
-
-        def sentences(value: Any) -> set:
-            return {
-                item
-                for part in re.split(r"[.!?;:\n]+", str(value or ""))
-                if len((item := normalized(part)).split()) >= 8
-            }
-
-        previous = []
-        matches = []
-        for index, block in enumerate(script_blocks or [], 1):
-            if not isinstance(block, dict):
-                continue
-            try:
-                bid = int(block.get('block_id') or block.get('book_id') or index)
-            except Exception:
-                bid = index
-            text = normalized(block.get('text') or '')
-            tokens = set(text.split())
-            text_sentences = sentences(block.get('text') or '')
-            if text:
-                for previous_id, previous_text, previous_tokens, previous_sentences in previous:
-                    reason = ''
-                    if text == previous_text:
-                        reason = 'exact'
-                    else:
-                        union = tokens | previous_tokens
-                        similarity = len(tokens & previous_tokens) / max(1, len(union))
-                        if min(len(tokens), len(previous_tokens)) >= 12 and similarity >= 0.86:
-                            reason = 'near_duplicate'
-                        elif text_sentences & previous_sentences:
-                            reason = 'repeated_sentence'
-                    if reason:
-                        matches.append({
-                            'block_id': bid,
-                            'duplicate_of_block': previous_id,
-                            'reason': reason,
-                        })
-                        break
-                previous.append((bid, text, tokens, text_sentences))
-        return matches
-
-    @classmethod
-    def _count_duplicate_sentences_for_tts(cls, script_blocks: list) -> int:
-        """Count duplicate narration blocks, matching the Script Editor gate."""
+    def _count_duplicate_sentences_for_tts(script_blocks: list) -> int:
+        """Count repeated narration sentences without changing the script."""
         def _fold(value: Any) -> str:
             normalized = unicodedata.normalize("NFKD", str(value or ""))
             no_marks = "".join(ch for ch in normalized if not unicodedata.combining(ch))
@@ -4324,28 +4274,21 @@ class FullPipeline:
                 parts = re.split(r"\s*[;；]\s*", str(text or "").strip())
             return [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
 
-        duplicate_blocks = {
-            int(item.get('block_id') or 0)
-            for item in cls._duplicate_narration_matches(script_blocks)
-        }
         seen = set()
-        for index, block in enumerate(script_blocks or [], 1):
+        count = 0
+        for block in script_blocks or []:
             if not isinstance(block, dict):
                 continue
-            try:
-                bid = int(block.get('block_id') or block.get('book_id') or index)
-            except Exception:
-                bid = index
             local = set()
             for sentence in _sentences(block.get("text") or ""):
                 signature = _sig(sentence)
                 if not signature:
                     continue
                 if signature in local or signature in seen:
-                    duplicate_blocks.add(bid)
+                    count += 1
                 local.add(signature)
             seen.update(local)
-        return len(duplicate_blocks)
+        return count
 
     @staticmethod
     def _count_under_target_story_blocks(script_blocks: list) -> int:
@@ -4359,127 +4302,6 @@ class FullPipeline:
             if minimum and len(str(item.get("text") or "").split()) < minimum:
                 remaining += 1
         return remaining
-
-    @classmethod
-    def _force_unique_duplicate_sentences(cls, script_blocks: list) -> tuple:
-        """Make stubborn repeated sentences unique without deleting scene anchors."""
-        if not script_blocks:
-            return script_blocks, 0
-
-        def fold(value: Any) -> str:
-            normalized = unicodedata.normalize("NFKD", str(value or ""))
-            no_marks = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-            return re.sub(r"\s+", " ", no_marks.lower()).strip()
-
-        stopwords = {
-            "va", "la", "thi", "roi", "co", "mot", "nhung", "nhu", "cho", "voi", "nay", "do", "day",
-            "khi", "neu", "den", "tren", "duoi", "trong", "tu", "sau", "truoc", "cua", "cac", "de",
-            "ve", "dang", "rat", "hon", "se", "duoc", "khong", "nguoi", "canh", "phim",
-        }
-
-        def signature(sentence: str) -> str:
-            tokens = [
-                token for token in re.findall(r"[a-z0-9]+", fold(sentence))
-                if len(token) > 2 and token not in stopwords
-            ]
-            return " ".join(tokens[:18]) if len(tokens) >= 4 else ""
-
-        def sentences(text: str) -> list:
-            parts = re.split(r"(?<=[.!?。！？])\s+", str(text or "").strip())
-            if len(parts) <= 1:
-                parts = re.split(r"\s*[;；]\s*", str(text or "").strip())
-            return [re.sub(r"\s+", " ", part).strip() for part in parts if part.strip()]
-
-        transitions = [
-            "Giữa lúc mọi chuyện chưa kịp lắng xuống,",
-            "Khi hệ quả trước đó vẫn còn tiếp diễn,",
-            "Ở chiều ngược lại của tình thế hiện tại,",
-            "Ngay sau bước ngoặt vừa được hé lộ,",
-            "Trong lúc áp lực quanh các nhân vật gia tăng,",
-            "Khi những thay đổi mới bắt đầu tác động,",
-            "Giữa chuỗi biến cố đang nối tiếp không ngừng,",
-            "Ngay trong thời điểm căng thẳng kế tiếp,",
-            "Khi mâu thuẫn trước mắt chưa thể khép lại,",
-            "Trong diễn biến kế tiếp của câu chuyện,",
-            "Giữa lúc cục diện tiếp tục đổi chiều,",
-            "Khi hậu quả của sự việc dần hiện rõ,",
-        ]
-        seen = set()
-        seen_blocks = []
-        changed = 0
-        output = []
-        duplicate_index = 0
-        for block in script_blocks:
-            if not isinstance(block, dict):
-                output.append(block)
-                continue
-            item = dict(block)
-            block_text = str(item.get('text') or '')
-            normalized_block = " ".join(re.findall(
-                r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+", block_text.lower()))
-            block_tokens = set(normalized_block.split())
-            block_sentences = {
-                normalized
-                for part in re.split(r"[.!?;:\n]+", block_text)
-                if len((normalized := " ".join(re.findall(
-                    r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+", part.lower()))).split()) >= 8
-            }
-            block_duplicate = False
-            for previous_text, previous_tokens, previous_sentences in seen_blocks:
-                union = block_tokens | previous_tokens
-                similarity = len(block_tokens & previous_tokens) / max(1, len(union))
-                if (normalized_block == previous_text
-                        or (min(len(block_tokens), len(previous_tokens)) >= 12 and similarity >= 0.86)
-                        or bool(block_sentences & previous_sentences)):
-                    block_duplicate = True
-                    break
-            rewritten = []
-            local = set()
-            block_changed = False
-            for sentence in sentences(item.get("text") or ""):
-                sig = signature(sentence)
-                if sig and (sig in seen or sig in local):
-                    cycle, offset = divmod(duplicate_index, len(transitions))
-                    prefix = transitions[offset]
-                    if cycle:
-                        second = transitions[cycle % len(transitions)]
-                        prefix = f"{prefix.rstrip(',')}; {second[:1].lower() + second[1:]}"
-                    duplicate_index += 1
-                    sentence = f"{prefix} {sentence[:1].lower() + sentence[1:] if sentence else sentence}"
-                    sig = signature(sentence)
-                    changed += 1
-                    block_changed = True
-                rewritten.append(sentence)
-                if sig:
-                    local.add(sig)
-            if block_duplicate and not block_changed and rewritten:
-                cycle, offset = divmod(duplicate_index, len(transitions))
-                prefix = transitions[offset]
-                if cycle:
-                    second = transitions[cycle % len(transitions)]
-                    prefix = f"{prefix.rstrip(',')}; {second[:1].lower() + second[1:]}"
-                duplicate_index += 1
-                rewritten[0] = f"{prefix} {rewritten[0][:1].lower() + rewritten[0][1:]}"
-                changed += 1
-                block_changed = True
-            seen.update(local)
-            if block_changed and rewritten:
-                item["text"] = " ".join(rewritten).strip()
-                item["dedupe_anchor_preserving_rewrite"] = True
-            final_text = str(item.get('text') or '')
-            final_normalized = " ".join(re.findall(
-                r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+", final_text.lower()))
-            final_tokens = set(final_normalized.split())
-            final_sentences = {
-                normalized
-                for part in re.split(r"[.!?;:\n]+", final_text)
-                if len((normalized := " ".join(re.findall(
-                    r"[a-z0-9\u00C0-\u024F\u1E00-\u1EFF]+", part.lower()))).split()) >= 8
-            }
-            if final_normalized:
-                seen_blocks.append((final_normalized, final_tokens, final_sentences))
-            output.append(item)
-        return output, changed
 
     def _rewrite_duplicate_sentences_for_tts(self, ai, script_blocks: list, render_blocks: list) -> tuple:
         """Ask Gemini once to rewrite blocks that contain repeated narration sentences."""
@@ -4546,15 +4368,6 @@ class FullPipeline:
                         pass
 
         payload = []
-        duplicate_matches = {
-            int(item.get('block_id') or 0): item
-            for item in self._duplicate_narration_matches(script_blocks)
-        }
-        text_by_id = {
-            _id(block, index): str(block.get('text') or '').strip()
-            for index, block in enumerate(script_blocks or [], 1)
-            if isinstance(block, dict)
-        }
         seen_global = set()
         duplicate_sentence_count = 0
         for index, block in enumerate(script_blocks, 1):
@@ -4572,12 +4385,6 @@ class FullPipeline:
                     duplicates.append(sentence[:240])
                 local_seen.add(sig)
             seen_global.update(local_seen)
-            duplicate_match = duplicate_matches.get(bid)
-            if duplicate_match and not duplicates:
-                duplicates.append(
-                    'Toàn block gần trùng với block '
-                    + str(duplicate_match.get('duplicate_of_block') or '')
-                )
             if not duplicates:
                 continue
             duplicate_sentence_count += len(duplicates)
@@ -4586,11 +4393,6 @@ class FullPipeline:
                 "block_id": bid,
                 "current_text": text[:1400],
                 "duplicate_sentences_to_replace": duplicates,
-                "duplicate_of_block": (
-                    duplicate_match.get('duplicate_of_block') if duplicate_match else None),
-                "must_not_repeat_text": text_by_id.get(
-                    int(duplicate_match.get('duplicate_of_block') or 0), '')[:1400]
-                    if duplicate_match else '',
                 "target_words": rb.get("target_words") or block.get("target_words") or 0,
                 "duration_seconds": rb.get("duration") or block.get("duration_hint_seconds") or 4.0,
                 "srt_reference": str(
@@ -4613,41 +4415,33 @@ class FullPipeline:
 
         old_web_fallback = os.environ.get("AUTORECAP_GEMINI_WEB_FALLBACK")
         os.environ["AUTORECAP_GEMINI_WEB_FALLBACK"] = "1"
-        fixed_by_id = {}
         try:
             from engine.prompt_vault import PromptVault
             template = PromptVault.instance().get("duplicate_repair") or ""
             if not template:
                 raise RuntimeError("duplicate_repair prompt is not vaulted")
-            # Large duplicate payloads often make Gemini Web return truncated
-            # JSON. Small independent batches preserve completed work.
-            for start in range(0, len(payload), 8):
-                batch = payload[start:start + 8]
-                try:
-                    prompt = template.replace(
-                        "{input_blocks}",
-                        json.dumps(batch, ensure_ascii=False),
-                    )
-                    raw = ai._try_generate(prompt)
-                    data = ai._extract_json_payload(raw) or {}
-                    repaired = data.get("script_blocks") if isinstance(data, dict) else data
-                    if not isinstance(repaired, list):
-                        repaired = []
-                    for item in repaired:
-                        if not isinstance(item, dict):
-                            continue
-                        bid = _id(item, 0)
-                        text = ai._clean_review_script_text(item.get("text") or "")
-                        if bid and text and len(text.split()) >= 6:
-                            fixed_by_id[bid] = text
-                except Exception as exc:
-                    self._log(
-                        f"   ⚠️ [CÂU LẶP] Nhóm {start // 8 + 1} chưa nhận được JSON hợp lệ: {exc}")
+            prompt = template.replace(
+                "{input_blocks}",
+                json.dumps(payload, ensure_ascii=False),
+            )
+            raw = ai._try_generate(prompt)
         finally:
             if old_web_fallback is None:
                 os.environ.pop("AUTORECAP_GEMINI_WEB_FALLBACK", None)
             else:
                 os.environ["AUTORECAP_GEMINI_WEB_FALLBACK"] = old_web_fallback
+
+        data = ai._extract_json_payload(raw) or {}
+        repaired = data.get("script_blocks") if isinstance(data, dict) else []
+        fixed_by_id = {}
+        if isinstance(repaired, list):
+            for item in repaired:
+                if not isinstance(item, dict):
+                    continue
+                bid = _id(item, 0)
+                text = ai._clean_review_script_text(item.get("text") or "")
+                if bid and text and len(text.split()) >= 6:
+                    fixed_by_id[bid] = text
 
         if not fixed_by_id:
             return script_blocks, 0, duplicate_sentence_count
@@ -4667,9 +4461,7 @@ class FullPipeline:
             updated.append(item)
         return updated, fixed_count, self._count_duplicate_sentences_for_tts(updated)
 
-    def _repair_under_target_story_blocks(
-        self, ai, script_blocks: list, render_blocks: list, batch_size: int = 8
-    ) -> tuple:
+    def _repair_under_target_story_blocks(self, ai, script_blocks: list, render_blocks: list) -> tuple:
         """Expand genuinely short story segments from their mapped evidence."""
         if not script_blocks:
             return script_blocks, 0, 0
@@ -4707,7 +4499,6 @@ class FullPipeline:
             pending.append({
                 "block_id": bid,
                 "current_text": text[:1800],
-                "locked_current_text": text[:1800],
                 "current_words": words,
                 "minimum_words": minimum,
                 "preferred_words": target,
@@ -4720,17 +4511,14 @@ class FullPipeline:
             return script_blocks, 0, 0
 
         repaired_by_id = {}
-        batch_size = max(1, min(int(batch_size or 8), 8))
-        for start in range(0, len(pending), batch_size):
-            batch = pending[start:start + batch_size]
+        for start in range(0, len(pending), 8):
+            batch = pending[start:start + 8]
             prompt = (
                 "Sửa các đoạn thuyết minh phim quá ngắn dưới đây. Trả duy nhất JSON "
                 "{\"script_blocks\":[{\"block_id\":1,\"text\":\"...\"}]}. "
                 "Giữ đúng block_id; viết tiếng Việt có dấu; mỗi text phải đạt ít nhất minimum_words "
                 "và không vượt preferred_words quá 15%; chỉ mở rộng bằng SRT/visual được cung cấp, "
-                "không bịa, không lặp câu, không filler. BẮT BUỘC giữ nguyên toàn bộ "
-                "locked_current_text ở đầu text rồi chỉ viết nối thêm; không được diễn đạt lại hay xóa "
-                "phần đã khóa vì đó là neo bám cảnh đã kiểm tra đạt.\nINPUT:\n"
+                "không bịa, không lặp câu, không filler.\nINPUT:\n"
                 + json.dumps(batch, ensure_ascii=False)
             )
             raw = ai._try_generate(prompt)
@@ -5375,24 +5163,10 @@ class FullPipeline:
                 "voice_id": self.voice,
                 "mode": "recap2_scene_anchored" if self._recap2_beat_mode_enabled() else "scene_pinned",
                 "min_voice_speed": float(os.environ.get("AUTORECAP_MIN_VOICE_SPEED", "1.0") or "1.0"),
-                "max_voice_speed": float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.4") or "1.4"),
+                "max_voice_speed": float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5"),
                 "continuous_voice": str(os.environ.get("AUTORECAP_CONTINUOUS_VOICE", continuous_default) or continuous_default).strip().lower()
                 not in {"0", "false", "no", "off"},
             }
-
-            def _timing_policy_matches(cached_policy):
-                if cached_policy == timing_policy:
-                    return True
-                if not actual_voice_timeline or not isinstance(cached_policy, dict):
-                    return False
-                # Actual-timeline segments keep raw TTS here; the playback ceiling
-                # is applied later by VOICE_CONCAT. A ceiling-only change must not
-                # regenerate every cached voice block.
-                cached_comparable = dict(cached_policy)
-                current_comparable = dict(timing_policy)
-                cached_comparable.pop("max_voice_speed", None)
-                current_comparable.pop("max_voice_speed", None)
-                return cached_comparable == current_comparable
 
             try:
                 from utils.helpers import FFmpegUtils
@@ -5408,7 +5182,7 @@ class FullPipeline:
                 # ratio = tts_dur / target_dur ; >1 = voice dai hon canh -> nen nhanh hon
                 # Gioi han toc do toi da mac dinh 1.5x de giong khong bi doc qua nhanh.
                 min_speed = float(os.environ.get("AUTORECAP_MIN_VOICE_SPEED", "1.0") or "1.0")
-                max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.4") or "1.4")
+                max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5")
                 ratio = max(max(1.0, min_speed), min(ratio, max(1.0, max_speed)))
                 return f"atempo={ratio:.6f}"
 
@@ -5442,7 +5216,7 @@ class FullPipeline:
                 except Exception:
                     pct = 0.0
                 min_speed = float(os.environ.get("AUTORECAP_MIN_VOICE_SPEED", "1.0") or "1.0")
-                max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.4") or "1.4")
+                max_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5")
                 min_pct = max(0.0, (min_speed - 1.0) * 100.0)
                 max_pct = max(0.0, (max_speed - 1.0) * 100.0)
                 pct = max(min_pct, min(max_pct, pct))
@@ -5765,20 +5539,6 @@ class FullPipeline:
                                 "duplicate_script_blocks",
                                 "empty_script_blocks",
                             }
-                            if self.ai_package.get('automatic_review'):
-                                serious_types.update({
-                                    "missing_script_blocks",
-                                    "script_render_block_mismatch",
-                                    "ai_quota_fallback_used",
-                                    "vietnamese_diacritics_missing",
-                                    "evidence_coverage_too_low",
-                                    "too_many_weak_context_blocks",
-                                    "critical_scene_anchor_missing",
-                                    "scene_mapping_too_many_warnings",
-                                    "scene_retrieval_mismatch_too_high",
-                                    "scene_retrieval_too_weak",
-                                    "poor_context_without_visual_rescue",
-                                })
                             if not actual_voice_timeline:
                                 serious_types.add("too_many_under_target_blocks")
                             serious_errors = [
@@ -6243,7 +6003,7 @@ class FullPipeline:
                         and os.path.exists(cached_seg.get("audio_path"))
                         and os.path.getsize(cached_seg.get("audio_path")) > 0
                         and cached_seg.get("timing_status") in ("ok", "unknown", "accepted_editor", "recap2_scene_anchored")
-                        and _timing_policy_matches(cached_seg.get("timing_policy"))
+                        and cached_seg.get("timing_policy") == timing_policy
                     ):
                         voice_segments.append(cached_seg)
                         skipped += 1
@@ -6348,7 +6108,7 @@ class FullPipeline:
                             words = len(clean.split())
                             natural_dur = words / 2.5  # 2.5 từ/giây tự nhiên
                             opt_ratio = natural_dur / target_dur
-                            max_voice_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.4") or "1.4")
+                            max_voice_speed = float(os.environ.get("AUTORECAP_MAX_VOICE_SPEED", "1.5") or "1.5")
                             max_rate_pct = max(0.0, (max_voice_speed - 1.0) * 100.0)
                             opt_rate_pct = max(0.0, min(max_rate_pct, (opt_ratio - 1.0) * 100.0))
                             opt_rate = _clamp_tts_rate(f"+{opt_rate_pct:.0f}%")
@@ -6581,32 +6341,12 @@ class FullPipeline:
             self.ai_package['automatic_review'] = True
             self.ai_package['script_editor_synced'] = False
             self.ai_package['script_editor_locked'] = False
-            self.ai_package.pop('automatic_review_warnings', None)
             for block in self.ai_package.get('script_blocks', []):
                 block['script_editor_locked'] = False
                 block['script_editor_synced'] = False
             ai = AIEngine(api_key=self.gemini_api_key)
             stage_attempts = 3
             stage_state = dict(self.ai_package.get('automatic_review_stages') or {})
-
-            def minor_alignment_limit(error_count: int, report: dict) -> tuple:
-                block_count = int(
-                    (report or {}).get('block_count')
-                    or len(self.ai_package.get('script_blocks', []))
-                    or 0
-                )
-                limit = max(1, min(5, int(math.ceil(block_count * 0.05))))
-                ratio = error_count / max(1, block_count)
-                minor = error_count <= limit and (
-                    ratio <= 0.08 or (block_count >= 20 and error_count <= 2)
-                )
-                return bool(minor), limit, ratio, block_count
-
-            def minor_under_target_limit(short_count: int) -> tuple:
-                block_count = len(self.ai_package.get('script_blocks', []))
-                limit = max(1, min(3, int(math.ceil(block_count * 0.03))))
-                ratio = short_count / max(1, block_count)
-                return bool(short_count <= limit and ratio <= 0.05), limit, ratio, block_count
 
             def save_stage(name: str, done: bool = True):
                 self.ai_package['script'] = '\n\n'.join(
@@ -6641,283 +6381,76 @@ class FullPipeline:
             self._log('   ✅ [1/4 LỜI KỂ] Đã đạt — khóa kết quả.')
 
             errors = 0
-            alignment_attempt = 0
-            alignment_stalled = 0
-            alignment_previous = None
-            alignment_limit = None
-            while True:
+            for attempt in range(stage_attempts):
                 self.ai_package, report = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
                 errors = int(report.get('error_count') or 0)
+                self._log(f'   🔧 [2/4 BÁM CẢNH] lần {attempt+1}/{stage_attempts}: còn {errors} lỗi')
                 if not errors:
                     break
-                if alignment_limit is None:
-                    alignment_limit = errors + 2
-                if alignment_previous is not None:
-                    if errors < alignment_previous:
-                        alignment_stalled = 0
-                    else:
-                        alignment_stalled += 1
-                if alignment_stalled >= 2 or alignment_attempt >= alignment_limit:
-                    break
-                alignment_attempt += 1
-                self._log(
-                    f'   🔧 [2/4 BÁM CẢNH] lần {alignment_attempt}: còn {errors} lỗi'
-                    + (' — còn giảm thì tiếp tục' if alignment_previous is not None and errors < alignment_previous else '')
-                )
-                alignment_previous = errors
                 self._repair_srt_alignment_final_pass(
                     ai, report, max_blocks=len(self.ai_package.get('script_blocks', [])))
                 save_stage('scene_alignment', False)
             self.ai_package, report = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
             errors = int(report.get('error_count') or 0)
             if errors:
-                alignment_minor, alignment_soft_limit, alignment_ratio, alignment_blocks = minor_alignment_limit(
-                    errors, report)
-                if not alignment_minor:
-                    raise RuntimeError(
-                        f'Bám cảnh còn {errors}/{alignment_blocks} block '
-                        f'({alignment_ratio:.1%}) sau {alignment_attempt} lượt, '
-                        f'vượt ngưỡng cảnh báo nhỏ {alignment_soft_limit} block; chưa gửi TTS.')
-                # Alignment is a bounded quality gate. A few stubborn semantic
-                # mismatches are not proof that the narration is unusable, and
-                # must not prevent the later duplicate/length/invalid-text gates
-                # from running. Keep the detailed report for customer review.
-                self.ai_package['automatic_review_warnings'] = {
-                    **dict(self.ai_package.get('automatic_review_warnings') or {}),
-                    'srt_alignment_error_count': errors,
-                    'srt_alignment_repair_attempts': alignment_attempt,
-                }
-                save_stage('scene_alignment', False)
-                self._log(
-                    f'   ⚠️ [2/4 BÁM CẢNH] Còn {errors} cảnh báo sau '
-                    f'{alignment_attempt} lượt — giữ báo cáo và tiếp tục các cổng an toàn.'
-                )
-            else:
-                save_stage('scene_alignment')
-                self._log('   ✅ [2/4 BÁM CẢNH] Đã đạt — khóa kết quả, không sửa lại.')
+                raise RuntimeError(f'Bám cảnh đã tự sửa {stage_attempts} lượt nhưng còn {errors} lỗi; chưa gửi TTS.')
+            save_stage('scene_alignment')
+            self._log('   ✅ [2/4 BÁM CẢNH] Đã đạt — khóa kết quả, không sửa lại.')
 
             duplicates = self._count_duplicate_sentences_for_tts(self.ai_package.get('script_blocks', []))
-            duplicate_attempt = 0
-            duplicate_stalled = 0
-            duplicate_limit = max(3, duplicates + 2)
-            while duplicates and duplicate_stalled < 2 and duplicate_attempt < duplicate_limit:
-                duplicate_attempt += 1
-                previous_duplicates = duplicates
+            for attempt in range(stage_attempts):
+                if not duplicates:
+                    break
                 snapshot = copy.deepcopy(self.ai_package)
-                repaired, proposed, _ = self._rewrite_duplicate_sentences_for_tts(
+                repaired, changed, _ = self._rewrite_duplicate_sentences_for_tts(
                     ai, self.ai_package.get('script_blocks', []), self.render_blocks)
-
-                repair_source = 'Gemini'
-                if not proposed:
-                    repaired, proposed = self._dedupe_script_blocks_for_tts(
-                        self.ai_package.get('script_blocks', []), self.render_blocks)
-                    repair_source = 'nội bộ'
-
-                from core.srt_alignment import SrtAlignmentValidator
-
-                def duplicate_block_key(item, fallback):
-                    try:
-                        return int(item.get('block_id') or item.get('book_id') or fallback)
-                    except Exception:
-                        return fallback
-
-                accepted_blocks = copy.deepcopy(snapshot.get('script_blocks', []))
-                accepted_by_id = {
-                    duplicate_block_key(block, index): index - 1
-                    for index, block in enumerate(accepted_blocks, 1)
-                    if isinstance(block, dict)
-                }
-                original_text = {
-                    duplicate_block_key(block, index): str(block.get('text') or '')
-                    for index, block in enumerate(accepted_blocks, 1)
-                    if isinstance(block, dict)
-                }
-                candidates = []
-                for index, block in enumerate(repaired, 1):
-                    if not isinstance(block, dict):
-                        continue
-                    bid = duplicate_block_key(block, index)
-                    if bid in accepted_by_id and str(block.get('text') or '') != original_text.get(bid, ''):
-                        candidates.append((bid, block))
-
-                accepted = 0
-                rejected = 0
-                current_duplicates = duplicates
-                baseline_alignment_errors = int(
-                    SrtAlignmentValidator.validate(accepted_blocks, self.render_blocks).get('error_count') or 0)
-                for bid, candidate in candidates:
-                    trial_blocks = copy.deepcopy(accepted_blocks)
-                    trial_blocks[accepted_by_id[bid]] = copy.deepcopy(candidate)
-                    check_report = SrtAlignmentValidator.validate(trial_blocks, self.render_blocks)
-                    regressed = int(check_report.get('error_count') or 0)
-                    invalid = sum(
-                        1 for block in trial_blocks
-                        if isinstance(block, dict) and invalid_narration(block.get('text')))
-                    trial_duplicates = self._count_duplicate_sentences_for_tts(trial_blocks)
-                    if regressed > baseline_alignment_errors or invalid or trial_duplicates >= current_duplicates:
-                        rejected += 1
-                        continue
-                    accepted_blocks = trial_blocks
-                    current_duplicates = trial_duplicates
-                    baseline_alignment_errors = regressed
-                    accepted += 1
-
-                self.ai_package = snapshot
-                self.ai_package['script_blocks'] = accepted_blocks
-                self.ai_package, _ = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
-                duplicates = current_duplicates
-                if duplicates < previous_duplicates:
-                    duplicate_stalled = 0
-                else:
-                    duplicate_stalled += 1
-                self._log(f'   🔧 [3/4 CÂU LẶP] lần {duplicate_attempt}: '
-                          f'{repair_source} đề xuất {proposed}, giữ {accepted} block an toàn, '
-                          f'bỏ riêng {rejected} block không đạt; còn {duplicates} câu lặp'
-                          + (' — còn giảm thì tiếp tục' if duplicates < previous_duplicates else
-                             f' — không giảm {duplicate_stalled}/2'))
+                self.ai_package['script_blocks'] = repaired
+                self.ai_package, check_report = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
+                regressed = int(check_report.get('error_count') or 0)
+                invalid = sum(1 for block in self.ai_package.get('script_blocks', [])
+                              if invalid_narration(block.get('text')))
+                if regressed or invalid:
+                    self.ai_package = snapshot
+                    self._log(f'   ↩️ [3/4 CÂU LẶP] Bỏ bản sửa lần {attempt+1}: '
+                              f'phát sinh {regressed} lỗi bám cảnh, {invalid} lỗi lời kể.')
+                    continue
+                duplicates = self._count_duplicate_sentences_for_tts(self.ai_package.get('script_blocks', []))
+                self._log(f'   🔧 [3/4 CÂU LẶP] lần {attempt+1}/{stage_attempts}: '
+                          f'đã sửa {changed} block, còn {duplicates} câu lặp')
                 save_stage('duplicate_narration', not duplicates)
             if duplicates:
-                snapshot = copy.deepcopy(self.ai_package)
-                forced_blocks, forced_count = self._force_unique_duplicate_sentences(
-                    self.ai_package.get('script_blocks', []))
-                self.ai_package['script_blocks'] = forced_blocks
-                self.ai_package, forced_report = self._annotate_srt_alignment(
-                    self.ai_package, self.render_blocks)
-                forced_errors = int(forced_report.get('error_count') or 0)
-                forced_invalid = sum(
-                    1 for block in self.ai_package.get('script_blocks', [])
-                    if invalid_narration(block.get('text')))
-                forced_remaining = self._count_duplicate_sentences_for_tts(
-                    self.ai_package.get('script_blocks', []))
-                baseline_errors = int(
-                    SrtAlignmentValidator.validate(
-                        snapshot.get('script_blocks', []), self.render_blocks
-                    ).get('error_count') or 0)
-                if forced_errors > baseline_errors or forced_invalid or forced_remaining:
-                    self.ai_package = snapshot
-                    self._log(
-                        f'   ↩️ [3/4 CÂU LẶP] Bản sửa neo-cảnh cuối không đạt: '
-                        f'{forced_errors} lỗi bám cảnh, {forced_invalid} lỗi lời kể, '
-                        f'còn {forced_remaining} câu lặp.')
-                else:
-                    duplicates = 0
-                    self._log(
-                        f'   🔧 [3/4 CÂU LẶP] Đã xử lý {forced_count} câu lặp khó '
-                        'bằng cách giữ nguyên neo cảnh và đổi cấu trúc câu.')
-                    save_stage('duplicate_narration')
-            if duplicates:
-                raise RuntimeError(f'Câu lặp không giảm thêm sau {duplicate_attempt} lượt, còn {duplicates} câu; '
+                raise RuntimeError(f'Câu lặp đã tự sửa {stage_attempts} lượt nhưng còn {duplicates} câu; '
                                    'kết quả bám cảnh được giữ nguyên và chưa gửi TTS.')
             save_stage('duplicate_narration')
             self._log('   ✅ [3/4 CÂU LẶP] Đã đạt — khóa kết quả, không sửa lại.')
 
             under_target = self._count_under_target_story_blocks(self.ai_package.get('script_blocks', []))
-            under_attempt = 0
-            under_stalled = 0
-            under_single_mode = False
-            under_limit = max(5, under_target + 4)
-            while under_target and under_attempt < under_limit:
-                if under_stalled >= 2:
-                    if under_single_mode:
-                        break
-                    under_single_mode = True
-                    under_stalled = 0
-                    self._log(
-                        '   🔄 [4/4 THIẾU CHỮ] Hai lượt theo nhóm không giảm '
-                        '→ chuyển sang sửa riêng từng block.')
-                under_attempt += 1
-                previous_under_target = under_target
+            for attempt in range(stage_attempts):
+                if not under_target:
+                    break
                 snapshot = copy.deepcopy(self.ai_package)
-                repaired, proposed, _ = self._repair_under_target_story_blocks(
-                    ai,
-                    self.ai_package.get('script_blocks', []),
-                    self.render_blocks,
-                    batch_size=1 if under_single_mode else 8,
-                )
-                from core.srt_alignment import SrtAlignmentValidator
-
-                def block_key(item, fallback):
-                    try:
-                        return int(item.get('block_id') or item.get('book_id') or fallback)
-                    except Exception:
-                        return fallback
-
-                accepted_blocks = copy.deepcopy(snapshot.get('script_blocks', []))
-                accepted_by_id = {
-                    block_key(block, index): index - 1
-                    for index, block in enumerate(accepted_blocks, 1)
-                    if isinstance(block, dict)
-                }
-                original_text = {
-                    block_key(block, index): str(block.get('text') or '')
-                    for index, block in enumerate(accepted_blocks, 1)
-                    if isinstance(block, dict)
-                }
-                candidates = []
-                for index, block in enumerate(repaired, 1):
-                    if not isinstance(block, dict):
-                        continue
-                    bid = block_key(block, index)
-                    if bid in accepted_by_id and str(block.get('text') or '') != original_text.get(bid, ''):
-                        candidates.append((bid, block))
-
-                accepted = 0
-                rejected_alignment = 0
-                rejected_duplicate = 0
-                rejected_invalid = 0
-                baseline_alignment_errors = int(
-                    SrtAlignmentValidator.validate(accepted_blocks, self.render_blocks).get('error_count') or 0)
-                for bid, candidate in candidates:
-                    trial_blocks = copy.deepcopy(accepted_blocks)
-                    trial_blocks[accepted_by_id[bid]] = copy.deepcopy(candidate)
-                    check_report = SrtAlignmentValidator.validate(trial_blocks, self.render_blocks)
-                    regressed = int(check_report.get('error_count') or 0)
-                    duplicate_regression = self._count_duplicate_sentences_for_tts(trial_blocks)
-                    invalid = sum(
-                        1 for block in trial_blocks
-                        if isinstance(block, dict) and invalid_narration(block.get('text')))
-                    if regressed > baseline_alignment_errors or duplicate_regression or invalid:
-                        rejected_alignment += int(regressed > baseline_alignment_errors)
-                        rejected_duplicate += int(bool(duplicate_regression))
-                        rejected_invalid += int(bool(invalid))
-                        continue
-                    accepted_blocks = trial_blocks
-                    baseline_alignment_errors = regressed
-                    accepted += 1
-
-                self.ai_package = snapshot
-                self.ai_package['script_blocks'] = accepted_blocks
-                self.ai_package, _ = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
+                repaired, expanded, _ = self._repair_under_target_story_blocks(
+                    ai, self.ai_package.get('script_blocks', []), self.render_blocks)
+                self.ai_package['script_blocks'] = repaired
+                self.ai_package, check_report = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
+                regressed = int(check_report.get('error_count') or 0)
+                duplicate_regression = self._count_duplicate_sentences_for_tts(
+                    self.ai_package.get('script_blocks', []))
+                invalid = sum(1 for block in self.ai_package.get('script_blocks', [])
+                              if invalid_narration(block.get('text')))
+                if regressed or duplicate_regression or invalid:
+                    self.ai_package = snapshot
+                    self._log(f'   ↩️ [4/4 THIẾU CHỮ] Bỏ bản sửa lần {attempt+1}: '
+                              f'phát sinh {regressed} lỗi bám cảnh, '
+                              f'{duplicate_regression} câu lặp, {invalid} lỗi lời kể.')
+                    continue
                 under_target = self._count_under_target_story_blocks(self.ai_package.get('script_blocks', []))
-                if under_target < previous_under_target:
-                    under_stalled = 0
-                else:
-                    under_stalled += 1
-                self._log(f'   🔧 [4/4 THIẾU CHỮ] lần {under_attempt}: '
-                          f'Gemini {"từng block" if under_single_mode else "theo nhóm"} '
-                          f'đề xuất {proposed}, giữ {accepted} block an toàn, '
-                          f'bỏ riêng {len(candidates) - accepted} block lỗi '
-                          f'(bám cảnh {rejected_alignment}, lặp {rejected_duplicate}, '
-                          f'lời kể {rejected_invalid}); còn {under_target} block'
-                          + (' — còn giảm thì tiếp tục' if under_target < previous_under_target else
-                             f' — không giảm {under_stalled}/2'))
+                self._log(f'   🔧 [4/4 THIẾU CHỮ] lần {attempt+1}/{stage_attempts}: '
+                          f'đã bổ sung {expanded} block, còn {under_target} block')
                 save_stage('under_target_blocks', not under_target)
             if under_target:
-                under_minor, under_soft_limit, under_ratio, under_blocks = minor_under_target_limit(under_target)
-                if not under_minor:
-                    raise RuntimeError(f'Block thiếu chữ không giảm thêm sau {under_attempt} lượt, '
-                                       f'còn {under_target}/{under_blocks} block ({under_ratio:.1%}), '
-                                       f'vượt ngưỡng cảnh báo nhỏ {under_soft_limit} block; chưa gửi TTS.')
-                self.ai_package['automatic_review_warnings'] = {
-                    **dict(self.ai_package.get('automatic_review_warnings') or {}),
-                    'under_target_block_count': under_target,
-                    'under_target_repair_attempts': under_attempt,
-                }
-                save_stage('under_target_blocks', False)
-                self._log(
-                    f'   ⚠️ [4/4 THIẾU CHỮ] Còn {under_target}/{under_blocks} block hơi ngắn '
-                    '— tỷ lệ nhỏ, timing/voice-fit sẽ xử lý.'
-                )
+                raise RuntimeError(f'Block thiếu chữ đã tự sửa {stage_attempts} lượt nhưng còn {under_target} block; '
+                                   'các kết quả đã đạt được giữ nguyên và chưa gửi TTS.')
 
             self.ai_package, final_report = self._annotate_srt_alignment(self.ai_package, self.render_blocks)
             errors = int(final_report.get('error_count') or 0)
@@ -6925,8 +6458,7 @@ class FullPipeline:
             under_target = self._count_under_target_story_blocks(self.ai_package.get('script_blocks', []))
             invalid = sum(1 for block in self.ai_package.get('script_blocks', [])
                           if invalid_narration(block.get('text')))
-            under_minor, under_soft_limit, under_ratio, under_blocks = minor_under_target_limit(under_target)
-            if duplicates or invalid or (under_target and not under_minor):
+            if errors or duplicates or under_target or invalid:
                 raise RuntimeError(f'Kiểm tra cuối chưa đạt: {duplicates} câu lặp, {under_target} block thiếu chữ, '
                                    f'{errors} lỗi bám cảnh, {invalid} lỗi lời kể; chưa gửi TTS.')
 
@@ -6934,27 +6466,7 @@ class FullPipeline:
             self._log('   ✅ [4/4 THIẾU CHỮ] Đã đạt — khóa kết quả.')
             self.ai_package['script_editor_synced'] = True
             self.ai_package['script_editor_locked'] = True
-            if under_target:
-                self.ai_package['automatic_review_warnings'] = {
-                    **dict(self.ai_package.get('automatic_review_warnings') or {}),
-                    'under_target_block_count': under_target,
-                    'under_target_repair_attempts': under_attempt,
-                }
-            if errors:
-                self.ai_package['automatic_review_warnings'] = {
-                    **dict(self.ai_package.get('automatic_review_warnings') or {}),
-                    'srt_alignment_error_count': errors,
-                    'srt_alignment_repair_attempts': alignment_attempt,
-                }
-                self._log(
-                    f'   ⚠️ Kiểm tra cuối còn {errors} cảnh báo bám cảnh; '
-                    'kịch bản hợp lệ nên tiếp tục tạo voice.'
-                )
-            self.ai_package['voice_source'] = (
-                'automatic_review_with_warnings'
-                if self.ai_package.get('automatic_review_warnings')
-                else 'automatic_review'
-            )
+            self.ai_package['voice_source'] = 'automatic_review'
             for block in self.ai_package['script_blocks']:
                 block['script_editor_locked'] = True
                 block['script_editor_synced'] = True
@@ -6999,7 +6511,7 @@ class FullPipeline:
             continuous_voice = True
             max_voice_gap = 0.0
         voice_concat_policy = {
-            "version": 10,
+            "version": 8,
             "playback_speed": 1.2,
             "actual_voice_timeline": actual_voice_timeline,
             "continuous_voice": bool(continuous_voice),
@@ -7051,8 +6563,8 @@ class FullPipeline:
                     return fit_ai
                 def rewrite_fit(text, words, block):
                     prompt = (
-                        f'Rút gọn lời kể phim sau còn tối đa {words + 5} từ để khớp thời gian cảnh; '
-                        f'ưu tiên khoảng {words} từ và được phép ngắn hơn nếu câu vẫn trọn nghĩa. '
+                        f'Rút gọn lời kể phim sau về khoảng {words} từ để khớp thời gian cảnh; '
+                        f'chấp nhận chênh lệch tối đa 10 từ ({max(1, words - 10)}-{words + 10} từ). '
                         'Giữ đúng nhân vật, hành động chính, quan hệ nhân quả và thứ tự sự kiện. '
                         'Không thêm tình tiết. Ưu tiên sự kiện chính; bỏ tính từ, câu nhắc lại và CTA quảng bá nếu không đủ chỗ. '
                         'Số từ tính theo khoảng trắng, mỗi tiếng Việt cách nhau được tính một từ. '
@@ -7081,12 +6593,7 @@ class FullPipeline:
                 norm_blocks = []
                 for idx, seg in enumerate(segs):
                     from core.voice_speed import speed_voice
-                    # fit_voices may assign a higher speed to one overlong
-                    # block (for example 1.28x). Never reset it to the global
-                    # 1.2x while normalizing for concat, otherwise render sees
-                    # the long audio again and fails after all voice work.
-                    fitted_speed = float(seg.get("playback_speed") or 1.2)
-                    speed_voice(seg, ffmpeg_bin, fitted_speed)
+                    speed_voice(seg, ffmpeg_bin, 1.2)
                     src = seg.get("audio_path", "")
                     if not src or not os.path.exists(src):
                         raise RuntimeError(f"Thiếu voice block {seg.get('block_id')}")
@@ -7920,72 +7427,6 @@ class FullPipeline:
     # STEP 11: RENDER_FINAL
     # ──────────────────────────────────────────────────────────────
 
-    def _repair_render_voice_overruns(self, ffmpeg_bin: str) -> int:
-        """Restore/raise per-block voice speed when cached concat reset it."""
-        if not self._uses_actual_voice_timeline() or not self.voice_segments:
-            return 0
-        from core.block_source_bounds import owned_source_ranges
-        from core.voice_speed import speed_voice
-        from core.voice_fit import _max_playback_speed
-
-        blocks = self.ai_package.get("script_blocks") or []
-        by_id = {}
-        for index, block in enumerate(blocks, 1):
-            if not isinstance(block, dict):
-                continue
-            try:
-                by_id[int(block.get("block_id") or index)] = block
-            except Exception:
-                pass
-
-        repaired = 0
-        for segment in self.voice_segments:
-            try:
-                bid = int(segment.get("block_id"))
-            except Exception:
-                continue
-            block = by_id.get(bid)
-            audio_path = str(segment.get("audio_path") or "")
-            if not block or not audio_path or not os.path.exists(audio_path):
-                continue
-            ranges = owned_source_ranges(block, self.render_blocks, self.scenes)
-            budget = sum(end - start for start, end in ranges)
-            duration = self._media_duration(audio_path)
-            if budget <= 0 or duration <= budget + .04:
-                continue
-
-            current_speed = float(segment.get("playback_speed") or 1.2)
-            remembered_speed = float(
-                (segment.get("duration_repair") or {}).get("fallback_playback_speed")
-                or current_speed
-            )
-            required_speed = current_speed * duration / budget * 1.01
-            speed = min(_max_playback_speed(), max(remembered_speed, required_speed))
-            self._log(
-                f"   💨 RENDER tự sửa block {bid}: voice {duration:.2f}s / hình {budget:.2f}s; "
-                f"tăng tốc riêng {current_speed:.2f}x → {speed:.2f}x"
-            )
-            speed_voice(segment, ffmpeg_bin, speed)
-            fitted = self._media_duration(segment.get("audio_path") or "")
-            if fitted <= 0 or fitted > budget + .04:
-                raise RuntimeError(
-                    f"Block {bid}: voice {fitted:.2f}s vẫn dài hơn hình {budget:.2f}s "
-                    f"sau tốc độ tối đa {speed:.2f}x."
-                )
-            segment["audio_duration"] = fitted
-            segment.setdefault("duration_repair", {})[
-                "render_preflight_playback_speed"
-            ] = round(speed, 4)
-            repaired += 1
-
-        if repaired:
-            seg_meta_path = os.path.join(self.output_dir, "voice_segments.json")
-            temporary = seg_meta_path + ".render-fit.tmp"
-            with open(temporary, "w", encoding="utf-8") as handle:
-                json.dump(self.voice_segments, handle, ensure_ascii=False, indent=2)
-            os.replace(temporary, seg_meta_path)
-        return repaired
-
     def step_render_final(self) -> bool:
         """Ghép clip theo voice thật thành video recap hoàn chỉnh.
 
@@ -8010,7 +7451,7 @@ class FullPipeline:
                 "header_color": list(self.header_color), "footer_color": list(self.footer_color),
                 "header_bar_color": list(self.header_bar_color), "footer_bar_color": list(self.footer_bar_color),
             },
-            "version": 9,
+            "version": 8,
             "clip_assembler_source_override": True,
             "duration_policy": "actual_voice_no_pad_no_global_atempo",
             "scene_sync_policy": "fixed_source_voice_speed120_v3",
@@ -8063,17 +7504,6 @@ class FullPipeline:
             except Exception:
                 import shutil
                 ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
-
-            repaired_voice_blocks = self._repair_render_voice_overruns(ffmpeg_bin)
-            if repaired_voice_blocks:
-                self._log(
-                    f"   ♻️ Đã sửa tốc độ {repaired_voice_blocks} block trước render; "
-                    "ghép lại voice track và phụ đề theo thời lượng mới."
-                )
-                if not self.step_voice_concat():
-                    raise RuntimeError("Không ghép lại được voice track sau khi sửa tốc độ block.")
-                if not self.step_voice_srt():
-                    raise RuntimeError("Không đồng bộ lại được phụ đề sau khi sửa tốc độ block.")
 
             # ── RECAP2.0 STYLE: ClipAssembler ───────────────────────────────
             # Khi recap2_beat_mode bật: cắt clip fit TTS duration thay vì
@@ -8545,10 +7975,7 @@ class FullPipeline:
             if not proceed:
                 error = getattr(self, 'script_review_error', '')
                 if error:
-                    if self.ai_package.get('automatic_review'):
-                        self._log(f"❌ Tự duyệt kịch bản không hoàn tất: {error}. Pipeline dừng trước khi tạo voice.")
-                    else:
-                        self._log(f"❌ Không mở được Script Editor: {error}. Pipeline dừng trước khi tạo voice.")
+                    self._log(f"❌ Không mở được Script Editor: {error}. Pipeline dừng trước khi tạo voice.")
                 else:
                     self._log("⏸️ Pipeline dừng tại Script Review: chưa xác nhận tạo voice.")
                 return False
