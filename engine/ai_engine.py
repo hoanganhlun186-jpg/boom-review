@@ -794,7 +794,10 @@ class AIEngine:
         Dùng persistent driver — không mở/đóng browser mỗi lần gọi.
         """
         try:
-            from core.gemini_web import send_prompt_to_gemini
+            from core.gemini_web import (
+                send_prompt_to_gemini, next_ready_profile, set_active_profile,
+                get_active_profile,
+            )
         except Exception as exc:
             raise RuntimeError(f"Gemini Web fallback unavailable: {exc}") from exc
 
@@ -804,7 +807,10 @@ class AIEngine:
         driver = self._get_or_create_web_driver(log=log_fn)
         response = ""
         visible_retry_done = False
+        tried_profiles = set()
         for attempt in range(1, 4):
+            current_profile = int(getattr(driver, "_autorecap_profile_index", get_active_profile()) or 1)
+            tried_profiles.add(current_profile)
             try:
                 response = send_prompt_to_gemini(
                     prompt=prompt,
@@ -823,6 +829,17 @@ class AIEngine:
                 if attempt == 3:
                     self.__class__._web_driver = None
                     raise RuntimeError(f"Gemini Web attempt {attempt} failed: {e}")
+            next_profile = next_ready_profile(current_profile)
+            if next_profile is not None and next_profile not in tried_profiles:
+                log_fn(
+                    f"   🔁 Gemini Profile {current_profile} lỗi/rỗng -> "
+                    f"chuyển sang Profile {next_profile}"
+                )
+                self.close_web_driver()
+                set_active_profile(next_profile)
+                driver = self._get_or_create_web_driver(log=log_fn)
+                visible_retry_done = False
+                continue
             if not visible_retry_done:
                 try:
                     from core.gemini_web import driver_is_headless

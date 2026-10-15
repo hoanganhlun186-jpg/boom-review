@@ -1532,15 +1532,27 @@ def _make_gemini_web_recap_call(primary_call, log=None):
 
     def web_call(prompt: str) -> str:
         try:
-            from core.gemini_web import driver_is_headless, send_prompt_to_gemini
+            from core.gemini_web import (
+                driver_is_headless, rotate_profile_driver, send_prompt_to_gemini,
+            )
             from engine.ai_engine import AIEngine
 
             log("   🌐 Gemini Web recap: mở/gửi prompt...")
             response = ""
             timeout = int(os.environ.get("AUTORECAP_RECAP_WEB_TIMEOUT", "900") or "900")
+            tried_profiles = set()
             for attempt in range(1, 4):
                 if web_driver.get("driver") is None:
                     web_driver["driver"] = AIEngine._get_or_create_web_driver(log=log)
+                if attempt > 1:
+                    replacement = rotate_profile_driver(
+                        web_driver.get("driver"), log=log, tried_profiles=tried_profiles
+                    )
+                    if replacement is not None:
+                        AIEngine._web_driver = replacement
+                        web_driver["driver"] = replacement
+                        web_driver["has_prompt"] = False
+                tried_profiles.add(int(getattr(web_driver.get("driver"), "_autorecap_profile_index", 1) or 1))
                 response = send_prompt_to_gemini(
                     prompt,
                     timeout=timeout,

@@ -29,6 +29,7 @@ import sys
 import time
 import logging
 import pathlib
+import shutil
 import threading
 import concurrent.futures
 from typing import Optional, Callable, List
@@ -80,6 +81,9 @@ _RESP_SELS = [
 # ── Số Chrome song song (1-5) ─────────────────────────────────────────────────
 _MAX_WORKERS   = 1          # mặc định 1, dùng set_max_workers() để đổi
 _worker_lock   = threading.Lock()
+_MAX_PROFILES  = 5
+_active_profile = 1
+_profile_lock = threading.RLock()
 
 def set_max_workers(n: int):
     """Đặt số Chrome tối đa chạy song song (1-5).
@@ -102,12 +106,18 @@ class GeminiDriver:
         driver._autorecap_profile_dir
         driver.quit() / driver.close()
     """
-    def __init__(self, pw, ctx, page, headless: bool, profile_dir: str):
+    def __init__(self, pw, ctx, page, headless: bool, profile_dir: str, profile_index: int = 1):
         self._pw                   = pw
         self._ctx                  = ctx
         self._page                 = page
         self._autorecap_headless   = headless
         self._autorecap_profile_dir = profile_dir
+        self._autorecap_profile_index = profile_index
+
+    @property
+    def title(self):
+        """Small compatibility ping used by AIEngine's persistent-driver cache."""
+        return self._page.title()
 
     def close(self):
         try: self._ctx.close()
@@ -123,17 +133,57 @@ class GeminiDriver:
 # Profile helpers
 # ══════════════════════════════════════════════════════════════════
 
-def _default_profile_dir() -> str:
+def _profile_root_dir() -> str:
     configured = str(os.environ.get("AUTORECAP_CHROME_PROFILE_DIR") or "").strip()
     if configured:
         return configured
     appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
     return str(pathlib.Path(appdata) / "AutoRecapPro" / "gemini_profile")
 
-def _auth_file_path() -> str:
-    return os.path.join(_default_profile_dir(), _AUTH_FILE)
+def _normalize_profile_index(index) -> int:
+    try:
+        return max(1, min(_MAX_PROFILES, int(index)))
+    except (TypeError, ValueError):
+        return 1
+
+def get_active_profile() -> int:
+    with _profile_lock:
+        return _active_profile
+
+def set_active_profile(index: int) -> int:
+    global _active_profile
+    with _profile_lock:
+        _active_profile = _normalize_profile_index(index)
+        return _active_profile
+
+def _default_profile_dir(profile_index=None) -> str:
+    """Return a profile directory; profile 1 keeps the legacy path."""
+    index = _normalize_profile_index(
+        get_active_profile() if profile_index is None else profile_index
+    )
+    root = _profile_root_dir()
+    return root if index == 1 else f"{root}_{index}"
+
+def _auth_file_path(profile_index=None) -> str:
+    return os.path.join(_default_profile_dir(profile_index), _AUTH_FILE)
+
+def ready_profile_indices() -> List[int]:
+    return [i for i in range(1, _MAX_PROFILES + 1) if _profile_has_session(_default_profile_dir(i))]
+
+def next_ready_profile(current=None) -> Optional[int]:
+    """Select the next logged-in profile, wrapping once around the list."""
+    ready = ready_profile_indices()
+    if not ready:
+        return None
+    current = _normalize_profile_index(get_active_profile() if current is None else current)
+    for index in ready:
+        if index > current:
+            return index
+    return ready[0]
 
 def _profile_has_session(profile_dir=None) -> bool:
+    if isinstance(profile_dir, int):
+        profile_dir = _default_profile_dir(profile_dir)
     profile_dir = str(profile_dir or _default_profile_dir())
     return os.path.isfile(os.path.join(profile_dir, _LOGIN_MARKER))
 
@@ -360,7 +410,7 @@ def _wait_response(page, timeout: int, log: Callable, previous_response: str = "
 # Driver creation — 2 chế độ
 # ══════════════════════════════════════════════════════════════════
 
-def create_driver(headless: Optional[bool] = None, log=None) -> GeminiDriver:
+def create_driver(headless: Optional[bool] = None, log=None, profile_index=None) -> GeminiDriver:
     """Chế độ 1: persistent context (dùng khi login hoặc chạy 1 luồng).
     Profile bị lock → không thể mở song song.
     """
@@ -368,7 +418,10 @@ def create_driver(headless: Optional[bool] = None, log=None) -> GeminiDriver:
     if headless is None: headless = _prefer_headless()
 
     sync_playwright = _find_playwright()
-    profile_dir = _default_profile_dir()
+    profile_index = _normalize_profile_index(
+        get_active_profile() if profile_index is None else profile_index
+    )
+    profile_dir = _default_profile_dir(profile_index)
     os.makedirs(profile_dir, exist_ok=True)
     kw = _launch_kwargs(headless)
     last_exc = None
@@ -384,8 +437,8 @@ def create_driver(headless: Optional[bool] = None, log=None) -> GeminiDriver:
             ctx.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            log(f"   🌐 Chrome {'ẩn' if headless else 'hiển thị'} đã khởi động")
-            return GeminiDriver(pw, ctx, page, headless, profile_dir)
+            log(f"   🌐 Chrome {'ẩn' if headless else 'hiển thị'} đã khởi động (Profile {profile_index})")
+            return GeminiDriver(pw, ctx, page, headless, profile_dir, profile_index)
         except Exception as e:
             last_exc = e
             log(f"   ❌ Chrome thất bại (lần {attempt}): {str(e)[:200]}")
@@ -396,14 +449,17 @@ def create_driver(headless: Optional[bool] = None, log=None) -> GeminiDriver:
     raise RuntimeError(f"Không khởi động Chrome: {last_exc}")
 
 
-def _create_worker_driver(log=None) -> GeminiDriver:
+def _create_worker_driver(log=None, profile_index=None) -> GeminiDriver:
     """Chế độ 2: browser.launch() + storage_state — dùng cho đa luồng.
     Mỗi luồng tạo Chrome hoàn toàn độc lập, không share profile, không lock.
     Cần auth.json đã được lưu từ lần login trước.
     """
     if log is None: log = lambda m: logger.info(m)
 
-    auth_path = _auth_file_path()
+    profile_index = _normalize_profile_index(
+        get_active_profile() if profile_index is None else profile_index
+    )
+    auth_path = _auth_file_path(profile_index)
     if not os.path.isfile(auth_path):
         raise RuntimeError(
             "Chưa có file đăng nhập (gemini_auth.json). "
@@ -432,18 +488,18 @@ def _create_worker_driver(log=None) -> GeminiDriver:
         ctx.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = ctx.new_page()
-        return GeminiDriver(pw, ctx, page, True, _default_profile_dir())
+        return GeminiDriver(pw, ctx, page, True, _default_profile_dir(profile_index), profile_index)
     except Exception:
         try: pw.stop()
         except Exception: pass
         raise
 
 
-def create_auto_driver(log=None, force_visible: bool = False) -> GeminiDriver:
+def create_auto_driver(log=None, force_visible: bool = False, profile_index=None) -> GeminiDriver:
     if log is None: log = lambda m: logger.info(m)
     use_headless = False if force_visible else _prefer_headless()
     try:
-        return create_driver(headless=use_headless, log=log)
+        return create_driver(headless=use_headless, log=log, profile_index=profile_index)
     except Exception as exc:
         if not use_headless:
             raise
@@ -452,7 +508,30 @@ def create_auto_driver(log=None, force_visible: bool = False) -> GeminiDriver:
             raise
         log(f"   ⚠️ Chrome ẩn thất bại: {str(exc)[:180]}")
         log("   👁️ Chuyển sang Chrome hiển thị để khôi phục phiên...")
-        return create_driver(headless=False, log=log)
+        return create_driver(headless=False, log=log, profile_index=profile_index)
+
+
+def rotate_profile_driver(driver, log=None, tried_profiles=None, force_visible=False):
+    """Close a failed driver and open the next ready profile, if available."""
+    if log is None: log = lambda m: logger.info(m)
+    tried = set(tried_profiles or ())
+    current = _normalize_profile_index(
+        getattr(driver, "_autorecap_profile_index", get_active_profile())
+    )
+    tried.add(current)
+    candidates = ready_profile_indices()
+    ordered = [i for i in candidates if i > current] + [i for i in candidates if i <= current]
+    target = next((i for i in ordered if i not in tried), None)
+    if target is None:
+        return None
+    try:
+        if driver:
+            driver.quit()
+    except Exception:
+        pass
+    set_active_profile(target)
+    log(f"   🔁 Profile {current} lỗi/rỗng -> thử Profile {target}")
+    return create_auto_driver(log=log, force_visible=force_visible, profile_index=target)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -625,14 +704,26 @@ def _worker_send(args):
     tagged_log = lambda m: log(f"{prefix} {m}")
 
     driver = None
+    tried_profiles = set()
     try:
-        tagged_log("🚀 Khởi động Chrome...")
-        driver = _create_worker_driver(log=tagged_log)
-        result = send_prompt_to_gemini(
-            prompt, timeout=timeout, log=tagged_log,
-            driver=driver, close_after=False, navigate=True,
-        )
-        return idx, result
+        while True:
+            profile_index = get_active_profile() if driver is None else driver._autorecap_profile_index
+            tried_profiles.add(profile_index)
+            tagged_log(f"🚀 Khởi động Chrome bằng Profile {profile_index}...")
+            if driver is None:
+                driver = _create_worker_driver(log=tagged_log, profile_index=profile_index)
+            result = send_prompt_to_gemini(
+                prompt, timeout=timeout, log=tagged_log,
+                driver=driver, close_after=False, navigate=True,
+            )
+            if result:
+                return idx, result
+            next_index = next_ready_profile(profile_index)
+            if next_index is None or next_index in tried_profiles:
+                return idx, ""
+            try: driver.close()
+            except Exception: pass
+            driver = _create_worker_driver(log=tagged_log, profile_index=next_index)
     except Exception as e:
         tagged_log(f"❌ Lỗi: {e}")
         return idx, ""
@@ -696,14 +787,31 @@ def send_prompt_parallel(
 # Backward-compat
 # ══════════════════════════════════════════════════════════════════
 
-def clear_auth() -> None:
+def clear_auth(profile_index=None) -> None:
     """Xóa marker + auth.json — gọi trước khi login lại để tránh báo thành công giả."""
-    profile_dir = pathlib.Path(_default_profile_dir())
+    profile_dir = pathlib.Path(_default_profile_dir(profile_index))
     for fname in (_LOGIN_MARKER, _AUTH_FILE):
         try:
             (profile_dir / fname).unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def logout_profile(profile_index=None) -> bool:
+    """Remove all browser/session data belonging to exactly one Gemini profile."""
+    index = _normalize_profile_index(
+        get_active_profile() if profile_index is None else profile_index
+    )
+    profile_dir = pathlib.Path(_default_profile_dir(index)).resolve()
+    allowed = {
+        pathlib.Path(_default_profile_dir(i)).resolve()
+        for i in range(1, _MAX_PROFILES + 1)
+    }
+    if profile_dir not in allowed:
+        raise RuntimeError("Đường dẫn Gemini profile không hợp lệ")
+    if profile_dir.exists():
+        shutil.rmtree(profile_dir)
+    return not profile_dir.exists()
 
 def is_selenium_available() -> bool:
     try:

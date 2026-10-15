@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.32"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.33"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
@@ -1092,6 +1092,30 @@ class App(PreviewEditorMixin, QMainWindow):
         self.gemini_web_status_label = QLabel_CTK(text="Đang kiểm tra phiên...", text_color="#94a3b8")
         gemini_row.layout().addWidget(self.gemini_web_status_label, 1)
         self.container._add(gemini_row)
+
+        profile_row = self._make_row()
+        self._add_label_to_row(profile_row, "Profile Gemini:", 120)
+        self.gemini_profile_combo = QComboBox()
+        for i in range(1, 6):
+            self.gemini_profile_combo.addItem(f"Profile {i}", i)
+        self.gemini_profile_combo.setFixedWidth(110)
+        self.gemini_profile_combo.setToolTip(
+            "Chọn profile để đăng nhập. Khi profile đang chạy lỗi, app tự thử profile đã đăng nhập kế tiếp."
+        )
+        self.gemini_profile_combo.currentIndexChanged.connect(self._on_gemini_profile_changed)
+        profile_row.layout().addWidget(self.gemini_profile_combo)
+        self.gemini_profile_logout_btn = QPushButton_CTK(
+            text="ĐĂNG XUẤT", width=105, fg_color="#991b1b",
+            command=self.logout_gemini_web_profile,
+        )
+        self.gemini_profile_logout_btn.setToolTip(
+            "Xóa cookie và toàn bộ phiên đăng nhập của đúng profile đang chọn."
+        )
+        profile_row.layout().addWidget(self.gemini_profile_logout_btn)
+        profile_row.layout().addWidget(QLabel_CTK(
+            text="Đăng nhập từng profile; app tự chuyển khi lỗi/quota.", text_color="#94a3b8"
+        ), 1)
+        self.container._add(profile_row)
 
         # ── Số Chrome song song ───────────────────────────────────────────────
         chrome_row = self._make_row()
@@ -2562,13 +2586,58 @@ class App(PreviewEditorMixin, QMainWindow):
         except Exception:
             pass
 
+    def _on_gemini_profile_changed(self):
+        try:
+            from core.gemini_web import set_active_profile
+            index = self.gemini_profile_combo.currentData() or 1
+            AIEngine.close_web_driver()
+            set_active_profile(index)
+            self._refresh_gemini_web_login_status()
+        except Exception:
+            pass
+
+    def logout_gemini_web_profile(self):
+        try:
+            from core.gemini_web import get_active_profile, logout_profile
+            profile_index = get_active_profile()
+            answer = QMessageBox.question(
+                self,
+                "Đăng xuất Gemini Web",
+                f"Đăng xuất và xóa toàn bộ phiên đăng nhập của Profile {profile_index}?\n\n"
+                "Các profile Gemini khác sẽ không bị ảnh hưởng.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            AIEngine.close_web_driver()
+            if logout_profile(profile_index):
+                self._thread_safe_log(
+                    f"✅ Đã đăng xuất Gemini Web Profile {profile_index}.\n"
+                )
+                self._refresh_gemini_web_login_status()
+            else:
+                raise RuntimeError("Không xóa được dữ liệu profile")
+        except Exception as exc:
+            self._thread_safe_log(f"❌ Đăng xuất Gemini Web lỗi: {exc}\n")
+            QMessageBox.warning(
+                self, "Không thể đăng xuất",
+                f"Không thể đăng xuất profile đang chọn:\n{exc}\n\n"
+                "Hãy đóng các cửa sổ Chrome của app rồi thử lại.",
+            )
+
     def _refresh_gemini_web_login_status(self):
         try:
-            from core.gemini_web import is_profile_ready
+            from core.gemini_web import is_profile_ready, ready_profile_indices, get_active_profile
             if is_profile_ready():
-                self._set_gemini_login_ui("Đã lưu phiên đăng nhập", "#22c55e")
+                ready = ready_profile_indices()
+                self._set_gemini_login_ui(
+                    f"Profile {get_active_profile()} sẵn sàng ({len(ready)}/5 đã đăng nhập)", "#22c55e"
+                )
             else:
-                self._set_gemini_login_ui("Chưa đăng nhập", "#f59e0b")
+                self._set_gemini_login_ui(
+                    f"Profile {get_active_profile()} chưa đăng nhập", "#f59e0b"
+                )
         except Exception:
             self._set_gemini_login_ui("Chưa kiểm tra được", "#f59e0b")
 
@@ -2585,12 +2654,14 @@ class App(PreviewEditorMixin, QMainWindow):
         try:
             from core.gemini_web import (
                 create_auto_driver, wait_for_gemini_login,
-                _default_profile_dir, _AUTH_FILE, _LOGIN_MARKER,
+                _default_profile_dir, _AUTH_FILE, _LOGIN_MARKER, get_active_profile,
             )
+
+            profile_index = get_active_profile()
 
             # Xóa phiên cũ trước khi login mới (tránh báo thành công giả)
             import pathlib
-            _profile = pathlib.Path(_default_profile_dir())
+            _profile = pathlib.Path(_default_profile_dir(profile_index))
             for _fname in (_LOGIN_MARKER, _AUTH_FILE):
                 try:
                     (_profile / _fname).unlink(missing_ok=True)
@@ -2599,7 +2670,9 @@ class App(PreviewEditorMixin, QMainWindow):
 
             # A stale/headless shared session can lock the persistent profile.
             AIEngine.close_web_driver()
-            driver = create_auto_driver(log=self._thread_safe_log, force_visible=True)
+            driver = create_auto_driver(
+                log=self._thread_safe_log, force_visible=True, profile_index=profile_index
+            )
             timeout = int(os.environ.get("AUTORECAP_GEMINI_LOGIN_TIMEOUT", "300") or 300)
             ready = wait_for_gemini_login(
                 driver,
@@ -2618,7 +2691,10 @@ class App(PreviewEditorMixin, QMainWindow):
                         "Đăng nhập thành công", "#22c55e", running=False
                     ),
                 )
-                self._thread_safe_log("✅ Gemini Web đã sẵn sàng; các lần gọi sau sẽ dùng phiên đã lưu.\n")
+                self._thread_safe_log(
+                    f"✅ Gemini Web Profile {profile_index} đã sẵn sàng; "
+                    "khi lỗi app sẽ tự thử profile kế tiếp.\n"
+                )
             else:
                 self.after(
                     0,
@@ -5474,6 +5550,7 @@ Trả về ngay DUY NHẤT file SRT tiếng Việt có dấu."""
                     from core.gemini_web import (
                         create_auto_driver,
                         driver_is_headless,
+                        rotate_profile_driver,
                         send_prompt_to_gemini,
                     )
 
@@ -5560,7 +5637,20 @@ Trả về ngay DUY NHẤT SRT tiếng Việt CÓ DẤU của phần này."""
                         )
                         last_error = None
                         previous_response = ""
+                        tried_profiles = set()
                         for attempt in range(1, 4):
+                            if attempt > 1:
+                                replacement = rotate_profile_driver(
+                                    driver,
+                                    log=lambda msg: self._thread_safe_log(str(msg).rstrip() + "\n"),
+                                    tried_profiles=tried_profiles,
+                                )
+                                if replacement is not None:
+                                    driver = replacement
+                                    web_loaded[0] = False
+                            tried_profiles.add(
+                                int(getattr(driver, "_autorecap_profile_index", 1) or 1)
+                            )
                             if attempt == 1:
                                 prompt_text = _build_batch_prompt(items, batch_label, len(batches))
                             else:
