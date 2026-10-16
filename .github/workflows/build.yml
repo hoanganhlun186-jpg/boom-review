@@ -30,7 +30,7 @@ jobs:
           zstandard `
           pillow `
           curl_cffi `
-          edge_tts `
+          "edge-tts==7.3.1" `
           certifi `
           google-generativeai `
           google-genai `
