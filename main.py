@@ -1,8 +1,9 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.38"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.39"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
+import traceback
 
 def _startup_trace(stage):
     """Write opt-in smoke-test checkpoints without affecting normal clients."""
@@ -733,6 +734,7 @@ class App(PreviewEditorMixin, QMainWindow):
         _sb_btn("❓", "Trợ giúp")
         sb_lay.addSpacing(10)
         root.addWidget(sidebar)
+        _startup_trace("App._build_ui:sidebar-ready")
 
         # ── Body (right of sidebar) ───────────────────────────────────────────
         body = QWidget()
@@ -786,6 +788,7 @@ class App(PreviewEditorMixin, QMainWindow):
             tab_bar_lay.addWidget(btn)
         tab_bar_lay.addStretch()
         body_lay.addWidget(tab_bar)
+        _startup_trace("App._build_ui:tabs-shell-ready")
 
         # Content area: tabs + right preview
         content = QWidget()
@@ -805,6 +808,7 @@ class App(PreviewEditorMixin, QMainWindow):
 
         self.preview_canvas = GraphicsPreview(right_frame)
         right_lay.addWidget(self.preview_canvas, 1)
+        _startup_trace("App._build_ui:preview-canvas-ready")
 
         # Mini player
         vplay_row = QWidget(); vplay_row.setStyleSheet("background:#111827;")
@@ -836,6 +840,7 @@ class App(PreviewEditorMixin, QMainWindow):
         self.preview_info.setWordWrap(True)
         right_lay.addWidget(self.preview_info)
         self._init_native_preview()
+        _startup_trace("App._build_ui:native-preview-ready")
 
         # Voice selection
         voice_row1 = QWidget()
@@ -888,6 +893,7 @@ class App(PreviewEditorMixin, QMainWindow):
         )
         elevenlabs_vn_layout.addWidget(self.btn_elevenlabs_vn_voices)
         right_lay.addWidget(elevenlabs_vn_row)
+        _startup_trace("App._build_ui:voice-controls-ready")
 
         # Play output
         self.btn_play_output = QPushButton_CTK(text="▶ Xem thử video output",
@@ -915,12 +921,20 @@ class App(PreviewEditorMixin, QMainWindow):
                                        fg_color="#4f46e5", command=self.start_thread)
         bot_lay.addWidget(self.btn_run)
         body_lay.addWidget(bottom)
+        _startup_trace("App._build_ui:bottom-bar-ready")
 
         # ── Build tab contents ────────────────────────────────────────────────
+        _startup_trace("App._build_ui:tab-du-an:begin")
         self._build_tab_du_an()
+        _startup_trace("App._build_ui:tab-du-an:end")
+        _startup_trace("App._build_ui:tab-noi-dung:begin")
         self._build_tab_noi_dung()
+        _startup_trace("App._build_ui:tab-noi-dung:end")
+        _startup_trace("App._build_ui:tab-style:begin")
         self._build_tab_style()
+        _startup_trace("App._build_ui:tab-style:end")
         self._switch_tab("du_an")
+        _startup_trace("App._build_ui:end")
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Tab 1: Dự án
@@ -7497,4 +7511,16 @@ def run_app():
 
 
 if __name__ == "__main__":
-    run_app()
+    try:
+        run_app()
+    except BaseException:
+        error_text = traceback.format_exc()
+        _startup_trace("UNHANDLED_EXCEPTION:\n" + error_text)
+        error_path = str(os.environ.get("AUTORECAP_STARTUP_ERROR") or "").strip()
+        if error_path:
+            try:
+                with open(error_path, "w", encoding="utf-8") as handle:
+                    handle.write(error_text)
+            except Exception:
+                pass
+        raise

@@ -178,7 +178,9 @@ jobs:
         $exe = Resolve-Path "dist\main.dist\BoomReview.exe"
         $workDir = Split-Path -Parent $exe
         $trace = Join-Path $workDir "startup-smoke.log"
+        $errorLog = Join-Path $workDir "startup-error.log"
         $env:AUTORECAP_STARTUP_TRACE = $trace
+        $env:AUTORECAP_STARTUP_ERROR = $errorLog
         $env:AUTORECAP_SMOKE_TEST = "1"
         Write-Host "Khoi dong thu: $exe"
         $process = Start-Process `
@@ -195,6 +197,11 @@ jobs:
             Write-Host "==============================="
           } else {
             Write-Warning "Khong tao duoc startup-smoke.log; crash xay ra truoc run_app"
+          }
+          if (Test-Path $errorLog) {
+            Write-Host "===== PYTHON TRACEBACK ====="
+            Get-Content $errorLog
+            Write-Host "============================"
           }
           Write-Error "BoomReview.exe crash khi khoi dong. Exit code: $($process.ExitCode)"
           exit 1
