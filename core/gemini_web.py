@@ -66,9 +66,17 @@ _INPUT_SELS = [
 _SEND_SELS = [
     "button[aria-label='Send message']",
     "button[aria-label='Gửi']",
+    "button[aria-label='Gửi tin nhắn']",
+    "button[aria-label*='send message' i]",
+    "button[aria-label*='send prompt' i]",
+    "button[aria-label*='gửi tin' i]",
+    "button[aria-label*='gửi lời' i]",
     "button[aria-label*='send' i]",
+    "button[mattooltip*='send' i]",
+    "button[mattooltip*='gửi' i]",
     "button.send-button",
     "button[data-mat-icon-name='send']",
+    "button[data-test-id*='send' i]",
 ]
 _RESP_SELS = [
     ".model-response-text .markdown",
@@ -345,23 +353,83 @@ def _send_message(page) -> bool:
     editor = _find_input(page)
     if editor is None or not _editor_text(editor):
         return False
-    clicked = False
-    for sel in _SEND_SELS + ["button[aria-label='Gửi tin nhắn']", "button[aria-label='Send']"]:
-        for btn in page.query_selector_all(sel):
-            if btn.is_visible() and not btn.is_disabled() and btn.get_attribute("aria-disabled") != "true":
-                btn.click()
-                clicked = True
-                break
-        if clicked:
-            break
-    if not clicked:
-        editor.press("Enter")
-    # Never treat a missing editor as proof that the message was submitted.
-    for _ in range(20):
-        page.wait_for_timeout(500)
+
+    def _composer_cleared():
         current = _find_input(page)
-        if current is not None and not _editor_text(current):
+        return current is not None and not _editor_text(current)
+
+    # Gemini/Angular can take several seconds to enable the send button after a
+    # large prompt is injected. Keep looking instead of pressing Enter once too
+    # early and then incorrectly waiting for a response that was never sent.
+    for attempt in range(24):
+        if _composer_cleared():
             return True
+        clicked = False
+        for sel in _SEND_SELS:
+            try:
+                buttons = page.query_selector_all(sel)
+            except Exception:
+                buttons = []
+            for btn in reversed(buttons):
+                try:
+                    if (
+                        btn.is_visible()
+                        and not btn.is_disabled()
+                        and btn.get_attribute("aria-disabled") != "true"
+                    ):
+                        btn.click(timeout=3000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                break
+
+        # Current Gemini builds sometimes expose only an icon/tooltip instead
+        # of a stable aria-label. Resolve the nearest enabled icon button.
+        if not clicked:
+            try:
+                clicked = bool(page.evaluate("""() => {
+                    const visible = el => !!(el && el.getClientRects().length);
+                    const buttons = [...document.querySelectorAll('button')];
+                    const target = buttons.reverse().find(btn => {
+                        if (!visible(btn) || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+                        const label = [
+                            btn.getAttribute('aria-label'), btn.getAttribute('mattooltip'),
+                            btn.getAttribute('data-tooltip'), btn.innerText,
+                            btn.querySelector('mat-icon')?.textContent,
+                            btn.querySelector('[data-mat-icon-name]')?.getAttribute('data-mat-icon-name')
+                        ].filter(Boolean).join(' ').toLowerCase();
+                        return /send|gửi|arrow_upward|submit/.test(label);
+                    });
+                    if (!target) return false;
+                    target.click();
+                    return true;
+                }"""))
+            except Exception:
+                clicked = False
+
+        if clicked:
+            for _ in range(6):
+                page.wait_for_timeout(500)
+                if _composer_cleared():
+                    return True
+        else:
+            # Let Angular finish processing the injected input before retrying.
+            page.wait_for_timeout(500)
+
+        # Keyboard fallback after the UI has had time to enable submission.
+        if attempt in (5, 11, 17):
+            current = _find_input(page)
+            if current is not None and _editor_text(current):
+                try:
+                    current.focus()
+                    current.press("Enter")
+                except Exception:
+                    pass
+                page.wait_for_timeout(1000)
+                if _composer_cleared():
+                    return True
     return False
 
 

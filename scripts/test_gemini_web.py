@@ -36,6 +36,10 @@ class FakeEditor:
     def focus(self):
         return None
 
+    def press(self, key):
+        if key == 'Enter':
+            self.text = ''
+
     def evaluate(self, script, value):
         self.evaluate_calls += 1
         self.text = value
@@ -47,6 +51,12 @@ class FakePage:
 
     def query_selector_all(self, selector):
         return self.editors if selector == gemini_web._INPUT_SELS[0] else []
+
+    def wait_for_timeout(self, milliseconds):
+        return None
+
+    def evaluate(self, script):
+        return False
 
 
 class GeminiWebInputTests(unittest.TestCase):
@@ -70,6 +80,11 @@ class GeminiWebInputTests(unittest.TestCase):
         composer = FakeEditor('Dòng một\nDòng hai')
         gemini_web._inject_text(FakePage([composer]), 'Dòng một\nDòng hai')
         self.assertEqual(composer.evaluate_calls, 0)
+
+    def test_send_retries_then_uses_keyboard_and_confirms_clear(self):
+        composer = FakeEditor('Prompt waiting to send')
+        self.assertTrue(gemini_web._send_message(FakePage([composer])))
+        self.assertEqual(composer.text, '')
 
 
 class GeminiWebProfileTests(unittest.TestCase):
