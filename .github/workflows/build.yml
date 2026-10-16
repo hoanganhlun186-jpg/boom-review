@@ -179,6 +179,7 @@ jobs:
         $workDir = Split-Path -Parent $exe
         $trace = Join-Path $workDir "startup-smoke.log"
         $env:AUTORECAP_STARTUP_TRACE = $trace
+        $env:AUTORECAP_SMOKE_TEST = "1"
         Write-Host "Khoi dong thu: $exe"
         $process = Start-Process `
           -FilePath $exe `

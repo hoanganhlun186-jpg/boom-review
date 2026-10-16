@@ -1,7 +1,7 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.37"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.38"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
 
 def _startup_trace(stage):
@@ -7445,28 +7445,37 @@ def run_app():
     _startup_trace("run_app:begin")
     qapp = QApplication.instance() or QApplication(sys.argv)
     _startup_trace("run_app:qapplication-ready")
+    smoke_test = str(os.environ.get("AUTORECAP_SMOKE_TEST") or "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 
     # ── Tải assets lần đầu (models + tools) ──────────────────────────────────
-    try:
-        from asset_downloader import ensure_assets
-        if not ensure_assets():
-            sys.exit(0)
-        _startup_trace("run_app:assets-ready")
-    except Exception as _dl_err:
-        QMessageBox.critical(None, "Lỗi", f"Không thể kiểm tra tài nguyên:\n{_dl_err}")
-        sys.exit(1)
+    if smoke_test:
+        _startup_trace("run_app:assets-skipped-for-smoke")
+    else:
+        try:
+            from asset_downloader import ensure_assets
+            if not ensure_assets():
+                sys.exit(0)
+            _startup_trace("run_app:assets-ready")
+        except Exception as _dl_err:
+            QMessageBox.critical(None, "Lỗi", f"Không thể kiểm tra tài nguyên:\n{_dl_err}")
+            sys.exit(1)
     # ─────────────────────────────────────────────────────────────────────────
 
     # ── Xác thực tài khoản BOOM Review ───────────────────────────────────────
-    try:
-        from boom_auth import check_auth
-        ok, username, token = check_auth()
-        if not ok:
-            sys.exit(0)
-        _startup_trace("run_app:auth-ready")
-    except Exception as _auth_err:
-        QMessageBox.critical(None, "Lỗi xác thực", f"Không thể tải module xác thực:\n{_auth_err}")
-        sys.exit(1)
+    if smoke_test:
+        _startup_trace("run_app:auth-skipped-for-smoke")
+    else:
+        try:
+            from boom_auth import check_auth
+            ok, username, token = check_auth()
+            if not ok:
+                sys.exit(0)
+            _startup_trace("run_app:auth-ready")
+        except Exception as _auth_err:
+            QMessageBox.critical(None, "Lỗi xác thực", f"Không thể tải module xác thực:\n{_auth_err}")
+            sys.exit(1)
     # ─────────────────────────────────────────────────────────────────────────
 
     app = ProjectTabs()
