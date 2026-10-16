@@ -22,7 +22,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install `
-          PySide6 `
+          "PySide6==6.11.2" `
           customtkinter `
           requests `
           nuitka `
@@ -171,6 +171,26 @@ jobs:
 
         print('Done copying assets')
         "
+
+    - name: Smoke test packaged EXE
+      shell: pwsh
+      run: |
+        $exe = Resolve-Path "dist\main.dist\BoomReview.exe"
+        $workDir = Split-Path -Parent $exe
+        Write-Host "Khoi dong thu: $exe"
+        $process = Start-Process `
+          -FilePath $exe `
+          -WorkingDirectory $workDir `
+          -WindowStyle Hidden `
+          -PassThru
+        Start-Sleep -Seconds 15
+        $process.Refresh()
+        if ($process.HasExited) {
+          Write-Error "BoomReview.exe crash khi khoi dong. Exit code: $($process.ExitCode)"
+          exit 1
+        }
+        Stop-Process -Id $process.Id -Force
+        Write-Host "Smoke test OK: BoomReview.exe van chay sau 15 giay"
 
     - name: Package into ZIP (portable / auto-update)
       shell: pwsh
