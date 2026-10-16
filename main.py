@@ -1,8 +1,20 @@
 from __future__ import annotations
 # Auto Recap Pro V2 — PySide6 port (giữ nguyên logic gốc)
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "1.0.36"   # ← đổi chỗ này mỗi khi build bản mới
+APP_VERSION = "1.0.37"   # ← đổi chỗ này mỗi khi build bản mới
 import os, sys, json, threading, time, subprocess, webbrowser, asyncio
+
+def _startup_trace(stage):
+    """Write opt-in smoke-test checkpoints without affecting normal clients."""
+    path = str(os.environ.get("AUTORECAP_STARTUP_TRACE") or "").strip()
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"{time.time():.3f} {stage}\n")
+            handle.flush()
+    except Exception:
+        pass
 
 # ── Fix Qt plugin path khi chạy bản Nuitka standalone ────────────────────────
 # Phải set TRƯỚC khi import bất kỳ thứ gì từ PySide6/Qt
@@ -578,6 +590,7 @@ class App(PreviewEditorMixin, QMainWindow):
                 continue
 
     def __init__(self, shared_only=False):
+        _startup_trace("App.__init__:begin")
         super().__init__()
         self._shared_only = shared_only
         self._ui_call.connect(lambda fn: fn(), Qt.QueuedConnection)
@@ -665,11 +678,16 @@ class App(PreviewEditorMixin, QMainWindow):
         self._full_pipeline_mode   = BooleanVar(value=True)
 
         # ── Build UI ─────────────────────────────────────────────────────────
+        _startup_trace("App.__init__:build_ui:begin")
         self._build_ui()
+        _startup_trace("App.__init__:build_ui:end")
         self._load_saved_config()
+        _startup_trace("App.__init__:load_config:end")
         self._connect_api_autosave()
         self.update_preview()
+        _startup_trace("App.__init__:preview:end")
         self.after(300, self._refresh_gemini_web_login_status)
+        _startup_trace("App.__init__:end")
 
     # ─────────────────────────────────────────────────────────────────────────
     #  UI construction
@@ -1091,31 +1109,12 @@ class App(PreviewEditorMixin, QMainWindow):
         gemini_row.layout().addWidget(self.gemini_web_login_btn)
         self.gemini_web_status_label = QLabel_CTK(text="Đang kiểm tra phiên...", text_color="#94a3b8")
         gemini_row.layout().addWidget(self.gemini_web_status_label, 1)
+        self.gemini_profile_manage_btn = QPushButton_CTK(
+            text="PROFILES", width=90, fg_color="#334155",
+            command=self.manage_gemini_web_profiles,
+        )
+        gemini_row.layout().addWidget(self.gemini_profile_manage_btn)
         self.container._add(gemini_row)
-
-        profile_row = self._make_row()
-        self._add_label_to_row(profile_row, "Profile Gemini:", 120)
-        self.gemini_profile_combo = QComboBox()
-        for i in range(1, 6):
-            self.gemini_profile_combo.addItem(f"Profile {i}", i)
-        self.gemini_profile_combo.setFixedWidth(110)
-        self.gemini_profile_combo.setToolTip(
-            "Chọn profile để đăng nhập. Khi profile đang chạy lỗi, app tự thử profile đã đăng nhập kế tiếp."
-        )
-        self.gemini_profile_combo.currentIndexChanged.connect(self._on_gemini_profile_changed)
-        profile_row.layout().addWidget(self.gemini_profile_combo)
-        self.gemini_profile_logout_btn = QPushButton_CTK(
-            text="ĐĂNG XUẤT", width=105, fg_color="#991b1b",
-            command=self.logout_gemini_web_profile,
-        )
-        self.gemini_profile_logout_btn.setToolTip(
-            "Xóa cookie và toàn bộ phiên đăng nhập của đúng profile đang chọn."
-        )
-        profile_row.layout().addWidget(self.gemini_profile_logout_btn)
-        profile_row.layout().addWidget(QLabel_CTK(
-            text="Đăng nhập từng profile; app tự chuyển khi lỗi/quota.", text_color="#94a3b8"
-        ), 1)
-        self.container._add(profile_row)
 
         # ── Số Chrome song song ───────────────────────────────────────────────
         chrome_row = self._make_row()
@@ -2586,15 +2585,64 @@ class App(PreviewEditorMixin, QMainWindow):
         except Exception:
             pass
 
-    def _on_gemini_profile_changed(self):
+    def _select_gemini_profile(self, profile_index):
         try:
             from core.gemini_web import set_active_profile
-            index = self.gemini_profile_combo.currentData() or 1
             AIEngine.close_web_driver()
-            set_active_profile(index)
+            set_active_profile(profile_index)
             self._refresh_gemini_web_login_status()
         except Exception:
             pass
+
+    def manage_gemini_web_profiles(self):
+        """Open profile controls lazily so startup remains Qt/Nuitka-safe."""
+        from core.gemini_web import get_active_profile, is_profile_ready
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Quản lý Gemini Web Profiles")
+        dialog.setMinimumWidth(430)
+        layout = QVBoxLayout(dialog)
+        explanation = QLabel(
+            "Chọn profile để đăng nhập hoặc đăng xuất. Khi một profile lỗi/quota, "
+            "app sẽ tự thử profile đã đăng nhập kế tiếp."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        combo = QComboBox(dialog)
+        for index in range(1, 6):
+            state = "đã đăng nhập" if is_profile_ready(index) else "chưa đăng nhập"
+            combo.addItem(f"Profile {index} — {state}", index)
+        combo.setCurrentIndex(max(0, get_active_profile() - 1))
+        layout.addWidget(combo)
+
+        buttons = QHBoxLayout()
+        login_btn = QPushButton("ĐĂNG NHẬP PROFILE", dialog)
+        logout_btn = QPushButton("ĐĂNG XUẤT PROFILE", dialog)
+        close_btn = QPushButton("ĐÓNG", dialog)
+        buttons.addWidget(login_btn)
+        buttons.addWidget(logout_btn)
+        buttons.addStretch()
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        def _chosen_profile():
+            return int(combo.currentData() or 1)
+
+        def _login_selected():
+            self._select_gemini_profile(_chosen_profile())
+            dialog.accept()
+            self.login_gemini_web()
+
+        def _logout_selected():
+            self._select_gemini_profile(_chosen_profile())
+            dialog.accept()
+            self.logout_gemini_web_profile()
+
+        login_btn.clicked.connect(_login_selected)
+        logout_btn.clicked.connect(_logout_selected)
+        close_btn.clicked.connect(dialog.reject)
+        dialog.exec()
 
     def logout_gemini_web_profile(self):
         try:
@@ -7295,6 +7343,7 @@ Tạo JSON ngay."""
 class ProjectTabs(QMainWindow):
     """Independent project widgets, processed sequentially by one worker."""
     def __init__(self):
+        _startup_trace("ProjectTabs.__init__:begin")
         super().__init__()
         self.setWindowTitle('BOOM Review — Các tập')
         self.resize(1500, 1000)
@@ -7307,7 +7356,9 @@ class ProjectTabs(QMainWindow):
         bar.addAction('＋ Thêm tab', self.add_project)
         bar.addAction('▶ Chạy các tab lần lượt', self.run_projects)
         bar.addAction('Dừng sau tab hiện tại', self.stop_requested.set)
+        _startup_trace("ProjectTabs.__init__:add_project:begin")
         self.add_project(first=True)
+        _startup_trace("ProjectTabs.__init__:end")
 
     def add_project(self, first=False):
         if self.running:
@@ -7391,13 +7442,16 @@ class ProjectTabs(QMainWindow):
             super().closeEvent(event)
 
 def run_app():
+    _startup_trace("run_app:begin")
     qapp = QApplication.instance() or QApplication(sys.argv)
+    _startup_trace("run_app:qapplication-ready")
 
     # ── Tải assets lần đầu (models + tools) ──────────────────────────────────
     try:
         from asset_downloader import ensure_assets
         if not ensure_assets():
             sys.exit(0)
+        _startup_trace("run_app:assets-ready")
     except Exception as _dl_err:
         QMessageBox.critical(None, "Lỗi", f"Không thể kiểm tra tài nguyên:\n{_dl_err}")
         sys.exit(1)
@@ -7409,13 +7463,16 @@ def run_app():
         ok, username, token = check_auth()
         if not ok:
             sys.exit(0)
+        _startup_trace("run_app:auth-ready")
     except Exception as _auth_err:
         QMessageBox.critical(None, "Lỗi xác thực", f"Không thể tải module xác thực:\n{_auth_err}")
         sys.exit(1)
     # ─────────────────────────────────────────────────────────────────────────
 
     app = ProjectTabs()
+    _startup_trace("run_app:project-tabs-ready")
     app.show()
+    _startup_trace("run_app:shown")
 
     # ── Auto-update: kiểm tra bản mới sau 3 giây ─────────────────────────────
     def _delayed_update_check():
