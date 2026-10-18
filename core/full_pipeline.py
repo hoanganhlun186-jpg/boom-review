@@ -5010,6 +5010,8 @@ class FullPipeline:
                 "warnings": rep.get("warnings") or [],
             })
 
+        from core.narration_guard import invalid_narration
+
         fixed_by_id = {}
         api_only = str(os.environ.get("AUTORECAP_ALIGNMENT_REPAIR_API_ONLY", "0") or "0").strip().lower() not in {
             "0", "false", "no", "off"
@@ -5018,31 +5020,44 @@ class FullPipeline:
         if api_only:
             os.environ["AUTORECAP_GEMINI_WEB_FALLBACK"] = "0"
         try:
-            prompt = (
-                "Bạn là biên tập kịch bản review phim. Sửa TẤT CẢ block bị lệch SRT trong một lần.\n"
-                "Trả về DUY NHẤT JSON hợp lệ dạng {\"script_blocks\":[{\"block_id\":1,\"text\":\"...\"}]}.\n"
-                "Quy tắc: giữ đúng block_id, không đổi thứ tự timeline, không bịa cảnh, mỗi text phải nhắc required_anchor nếu có, "
-                "không dùng SOURCE_ONLY_CONTEXT như hành động đang thấy trên màn hình, tiếng Việt có dấu, không giải thích.\n"
-                f"INPUT_BLOCKS:\n{json.dumps(payload, ensure_ascii=False)}"
-            )
-            self._log(
-                f"   [SRT_ALIGNMENT] Gọi Gemini API sửa gộp {len(payload)} blocks"
-                + (" (không dùng Web fallback)" if api_only else "")
-            )
-            raw = ai._try_generate(prompt)
-            data = ai._extract_json_payload(raw) or {}
-            repaired = data.get("script_blocks") if isinstance(data, dict) else []
-            if isinstance(repaired, list):
-                for item in repaired:
-                    if not isinstance(item, dict):
-                        continue
-                    try:
-                        bid = int(item.get("block_id") or 0)
-                    except Exception:
-                        bid = 0
-                    text = ai._clean_review_script_text(item.get("text") or "")
-                    if bid and text:
-                        fixed_by_id[bid] = text
+            for attempt in range(1, 4):
+                pending = [item for item in payload if item["block_id"] not in fixed_by_id]
+                if not pending:
+                    break
+                prompt = (
+                    "Bạn là biên tập kịch bản review phim. Sửa TẤT CẢ block bị lệch SRT trong một lần.\n"
+                    "Trả về DUY NHẤT JSON hợp lệ dạng {\"script_blocks\":[{\"block_id\":1,\"text\":\"...\"}]}.\n"
+                    "Quy tắc: giữ đúng block_id, không đổi thứ tự timeline, không bịa cảnh, mỗi text phải nhắc required_anchor nếu có, "
+                    "không dùng SOURCE_ONLY_CONTEXT như hành động đang thấy trên màn hình, tiếng Việt có dấu, không giải thích.\n"
+                    "Nếu yêu cầu trước bị lỗi, hãy viết lời kể trực tiếp; không xin lỗi hoặc từ chối.\n"
+                    f"INPUT_BLOCKS:\n{json.dumps(pending, ensure_ascii=False)}"
+                )
+                self._log(
+                    f"   [SRT_ALIGNMENT] Gemini sửa gộp lần {attempt}/3: {len(pending)} block"
+                    + (" (không dùng Web fallback)" if api_only else "")
+                )
+                try:
+                    raw = ai._try_generate(prompt)
+                    data = ai._extract_json_payload(raw) or {}
+                    repaired = data.get("script_blocks") if isinstance(data, dict) else []
+                    if not isinstance(repaired, list):
+                        repaired = []
+                    pending_ids = {item["block_id"] for item in pending}
+                    for item in repaired:
+                        if not isinstance(item, dict):
+                            continue
+                        try:
+                            bid = int(item.get("block_id") or 0)
+                        except Exception:
+                            bid = 0
+                        text = ai._clean_review_script_text(item.get("text") or "")
+                        if bid in pending_ids and text and not invalid_narration(text):
+                            fixed_by_id[bid] = text
+                except Exception as exc:
+                    self._log(f"   ⚠️ [SRT_ALIGNMENT] Lần {attempt}/3 lỗi: {exc}")
+                remaining = len(payload) - len(fixed_by_id)
+                if remaining and attempt < 3:
+                    self._log(f"   🔁 [SRT_ALIGNMENT] Retry {remaining} block chưa hợp lệ")
         except Exception as exc:
             self._log(f"   [SRT_ALIGNMENT] API repair skip -> dùng sửa nội bộ: {exc}")
         finally:
@@ -5160,6 +5175,8 @@ class FullPipeline:
                 "errors": rep.get("errors") or [],
             })
 
+        from core.narration_guard import invalid_narration
+
         fixed_by_id = {}
         allow_web = str(os.environ.get("AUTORECAP_ALIGNMENT_FINAL_WEB", "1") or "1").strip().lower() not in {
             "0", "false", "no", "off"
@@ -5168,32 +5185,50 @@ class FullPipeline:
         if allow_web:
             os.environ["AUTORECAP_GEMINI_WEB_FALLBACK"] = "1"
         try:
-            prompt = (
-                "Bạn là biên tập viên review phim tiếng Việt. Sửa riêng các block còn lỗi SRT cuối cùng.\n"
-                "Trả về DUY NHẤT JSON hợp lệ: {\"script_blocks\":[{\"block_id\":1,\"text\":\"...\"}]}.\n"
-                "Luật bắt buộc:\n"
-                "- Mỗi text phải nhắc rõ nội dung must_include_anchor/cut_visible_srt bằng câu tự nhiên.\n"
-                "- Không nhắc forbidden_source_only_context như hành động đang thấy trên màn hình.\n"
-                "- Không dùng câu kỹ thuật như 'ở cảnh này', 'điểm cần theo sát', 'setup', 'block', 'book'.\n"
-                "- Viết như lời thuyết minh review chuyên nghiệp, tiếng Việt có dấu, không giải thích.\n"
-                "- Giữ gần target_words nếu có.\n"
-                f"INPUT_BLOCKS:\n{json.dumps(payload, ensure_ascii=False)}"
-            )
-            self._log(
-                f"   [SRT_ALIGNMENT] Final repair: sửa riêng {len(payload)} block còn lỗi"
-                + (" bằng Gemini Web/API" if allow_web else " bằng API")
-            )
-            raw = ai._try_generate(prompt)
-            data = ai._extract_json_payload(raw) or {}
-            repaired = data.get("script_blocks") if isinstance(data, dict) else []
-            if isinstance(repaired, list):
-                for item in repaired:
-                    if not isinstance(item, dict):
-                        continue
-                    bid = _id(item, 0)
-                    text = ai._clean_review_script_text(item.get("text") or "")
-                    if bid and text and len(text.split()) >= 6:
-                        fixed_by_id[bid] = text
+            for attempt in range(1, 4):
+                pending = [item for item in payload if item["block_id"] not in fixed_by_id]
+                if not pending:
+                    break
+                prompt = (
+                    "Bạn là biên tập viên review phim tiếng Việt. Sửa riêng các block còn lỗi SRT cuối cùng.\n"
+                    "Trả về DUY NHẤT JSON hợp lệ: {\"script_blocks\":[{\"block_id\":1,\"text\":\"...\"}]}.\n"
+                    "Luật bắt buộc:\n"
+                    "- Mỗi text phải nhắc rõ nội dung must_include_anchor/cut_visible_srt bằng câu tự nhiên.\n"
+                    "- Không nhắc forbidden_source_only_context như hành động đang thấy trên màn hình.\n"
+                    "- Không dùng câu kỹ thuật như 'ở cảnh này', 'điểm cần theo sát', 'setup', 'block', 'book'.\n"
+                    "- Viết như lời thuyết minh review chuyên nghiệp, tiếng Việt có dấu, không giải thích.\n"
+                    "- Không xin lỗi, từ chối hoặc tự giới thiệu là AI.\n"
+                    "- Giữ gần target_words nếu có.\n"
+                    f"INPUT_BLOCKS:\n{json.dumps(pending, ensure_ascii=False)}"
+                )
+                self._log(
+                    f"   [SRT_ALIGNMENT] Final repair lần {attempt}/3: {len(pending)} block"
+                    + (" bằng Gemini Web/API" if allow_web else " bằng API")
+                )
+                try:
+                    raw = ai._try_generate(prompt)
+                    data = ai._extract_json_payload(raw) or {}
+                    repaired = data.get("script_blocks") if isinstance(data, dict) else []
+                    if not isinstance(repaired, list):
+                        repaired = []
+                    pending_ids = {item["block_id"] for item in pending}
+                    for item in repaired:
+                        if not isinstance(item, dict):
+                            continue
+                        bid = _id(item, 0)
+                        text = ai._clean_review_script_text(item.get("text") or "")
+                        if (
+                            bid in pending_ids
+                            and text
+                            and len(text.split()) >= 6
+                            and not invalid_narration(text)
+                        ):
+                            fixed_by_id[bid] = text
+                except Exception as exc:
+                    self._log(f"   ⚠️ [SRT_ALIGNMENT] Final repair lần {attempt}/3 lỗi: {exc}")
+                remaining = len(payload) - len(fixed_by_id)
+                if remaining and attempt < 3:
+                    self._log(f"   🔁 [SRT_ALIGNMENT] Retry {remaining} block lời kể chưa hợp lệ")
         except Exception as exc:
             self._log(f"   [SRT_ALIGNMENT] Final repair AI skip -> dùng sửa nội bộ: {exc}")
         finally:
@@ -5230,8 +5265,15 @@ class FullPipeline:
             )
             target_words = int((rb.get("target_words") or block.get("target_words") or 0) or 0)
             # A factual scene description is safer than invented emotional filler.
-            text = self._strip_cjk_text(rep.get('required_anchor') or anchor).rstrip('.!?') + '.'
-            block["text"] = text
+            text = self._strip_cjk_text(rep.get('required_anchor') or anchor).rstrip('.!?')
+            if not text or invalid_narration(text):
+                # Keep valid existing narration when the anchor itself is
+                # empty/unsafe. This may leave a bounded alignment warning,
+                # but cannot poison every later duplicate-repair candidate.
+                text = str(block.get("text") or "").strip().rstrip('.!?')
+            if not text or invalid_narration(text):
+                text = self._generic_review_fallback(self.movie_title, anchor).rstrip('.!?')
+            block["text"] = text + "."
             block["srt_alignment_final_deterministic_repair"] = True
             changed += 1
 
@@ -6770,9 +6812,9 @@ class FullPipeline:
                     trial_blocks[accepted_by_id[bid]] = copy.deepcopy(candidate)
                     check_report = SrtAlignmentValidator.validate(trial_blocks, self.render_blocks)
                     regressed = int(check_report.get('error_count') or 0)
-                    invalid = sum(
-                        1 for block in trial_blocks
-                        if isinstance(block, dict) and invalid_narration(block.get('text')))
+                    # Judge the proposed block itself. A stale bad block
+                    # elsewhere must not make every independent repair fail.
+                    invalid = invalid_narration(candidate.get('text'))
                     trial_duplicates = self._count_duplicate_sentences_for_tts(trial_blocks)
                     if regressed > baseline_alignment_errors or invalid or trial_duplicates >= current_duplicates:
                         rejected += 1
@@ -6893,9 +6935,7 @@ class FullPipeline:
                     check_report = SrtAlignmentValidator.validate(trial_blocks, self.render_blocks)
                     regressed = int(check_report.get('error_count') or 0)
                     duplicate_regression = self._count_duplicate_sentences_for_tts(trial_blocks)
-                    invalid = sum(
-                        1 for block in trial_blocks
-                        if isinstance(block, dict) and invalid_narration(block.get('text')))
+                    invalid = invalid_narration(candidate.get('text'))
                     if regressed > baseline_alignment_errors or duplicate_regression or invalid:
                         rejected_alignment += int(regressed > baseline_alignment_errors)
                         rejected_duplicate += int(bool(duplicate_regression))

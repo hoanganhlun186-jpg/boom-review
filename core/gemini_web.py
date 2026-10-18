@@ -358,6 +358,136 @@ def _send_message(page) -> bool:
         current = _find_input(page)
         return current is not None and not _editor_text(current)
 
+    def _press_enter():
+        """Submit from the active composer using a real Playwright key event."""
+        current = _find_input(page)
+        if current is None or not _editor_text(current):
+            return False
+        try:
+            current.focus()
+            current.press("Enter")
+            page.wait_for_timeout(1200)
+            return _composer_cleared()
+        except Exception:
+            return False
+
+    def _click_nearest_send_control():
+        """Click the enabled control nearest the composer's bottom-right corner.
+
+        Gemini currently renders the blue send arrow without a dependable
+        aria-label on some accounts/locales.  Spatial selection mirrors the
+        user's manual click while avoiding unrelated controls elsewhere.
+        """
+        current = _find_input(page)
+        if current is None or not _editor_text(current):
+            return False
+        try:
+            editor_box = current.bounding_box()
+            if not editor_box:
+                return False
+            target_x = editor_box["x"] + editor_box["width"]
+            target_y = editor_box["y"] + editor_box["height"]
+
+            # Prefer Gemini's actual send glyph, regardless of which custom
+            # Angular element owns it. Dispatching the full pointer/mouse
+            # sequence also handles controls that ignore HTMLElement.click().
+            icon_clicked = bool(current.evaluate("""(editor) => {
+                const er = editor.getBoundingClientRect();
+                const visible = el => !!(el && el.getClientRects().length);
+                const icons = [...document.querySelectorAll(
+                    'mat-icon, [data-mat-icon-name], [fonticon], svg'
+                )];
+                const matches = icons.filter(icon => {
+                    if (!visible(icon)) return false;
+                    const label = [
+                        icon.textContent, icon.getAttribute('data-mat-icon-name'),
+                        icon.getAttribute('fonticon'), icon.getAttribute('aria-label'),
+                        icon.closest('[aria-label]')?.getAttribute('aria-label')
+                    ].filter(Boolean).join(' ').toLowerCase();
+                    return /arrow_upward|send|gửi/.test(label);
+                }).map(icon => {
+                    const r = icon.getBoundingClientRect();
+                    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                    const dx = cx - er.right, dy = cy - er.bottom;
+                    return {icon, score: dx * dx + dy * dy, dx, dy};
+                }).filter(x => x.dx >= -220 && x.dx <= 120 && x.dy >= -140 && x.dy <= 180)
+                  .sort((a, b) => a.score - b.score);
+                if (!matches.length) return false;
+                const icon = matches[0].icon;
+                const target = icon.closest('button, [role="button"], [tabindex]') || icon.parentElement || icon;
+                const r = target.getBoundingClientRect();
+                const opts = {bubbles: true, cancelable: true, view: window,
+                              clientX: r.left + r.width / 2, clientY: r.top + r.height / 2};
+                for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                    target.dispatchEvent(type.startsWith('pointer')
+                        ? new PointerEvent(type, opts) : new MouseEvent(type, opts));
+                }
+                return true;
+            }"""))
+            if icon_clicked:
+                page.wait_for_timeout(1200)
+                if _composer_cleared():
+                    return True
+
+            # Physically click the most likely blue-arrow coordinates before
+            # considering any nearby controls such as microphone/model menu.
+            for dx, dy in (
+                (-18, 28), (-32, 28), (-18, 44), (-42, 44),
+                (0, 28), (-18, 60), (-55, 28),
+            ):
+                try:
+                    page.mouse.click(target_x + dx, target_y + dy)
+                    page.wait_for_timeout(1200)
+                    if _composer_cleared():
+                        return True
+                except Exception:
+                    continue
+
+            candidates = []
+            for selector in ("button", "[role='button']", "[tabindex='0']"):
+                for control in page.query_selector_all(selector):
+                    try:
+                        if not control.is_visible():
+                            continue
+                        if control.get_attribute("aria-disabled") == "true":
+                            continue
+                        if hasattr(control, "is_disabled") and control.is_disabled():
+                            continue
+                        box = control.bounding_box()
+                        if not box:
+                            continue
+                        cx = box["x"] + box["width"] / 2
+                        cy = box["y"] + box["height"] / 2
+                        dx, dy = cx - target_x, cy - target_y
+                        # Send is immediately right/below the editable region.
+                        if -180 <= dx <= 100 and -100 <= dy <= 160:
+                            candidates.append((dx * dx + dy * dy, control))
+                    except Exception:
+                        continue
+            for _, control in sorted(candidates, key=lambda item: item[0]):
+                try:
+                    control.click(timeout=3000, force=True)
+                    page.wait_for_timeout(1200)
+                    if _composer_cleared():
+                        return True
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+        return False
+
+    # Gemini reliably accepts Enter after the composer is populated.  Try this
+    # first: its send button changes markup frequently and may have no stable
+    # aria-label even while the blue arrow is visible and enabled.
+    if _press_enter():
+        return True
+    page.wait_for_timeout(800)
+    if _press_enter():
+        return True
+    if _click_nearest_send_control():
+        return True
+
     # Gemini/Angular can take several seconds to enable the send button after a
     # large prompt is injected. Keep looking instead of pressing Enter once too
     # early and then incorrectly waiting for a response that was never sent.
@@ -418,18 +548,11 @@ def _send_message(page) -> bool:
             # Let Angular finish processing the injected input before retrying.
             page.wait_for_timeout(500)
 
-        # Keyboard fallback after the UI has had time to enable submission.
-        if attempt in (5, 11, 17):
-            current = _find_input(page)
-            if current is not None and _editor_text(current):
-                try:
-                    current.focus()
-                    current.press("Enter")
-                except Exception:
-                    pass
-                page.wait_for_timeout(1000)
-                if _composer_cleared():
-                    return True
+        # Retry the real Enter event while Angular is enabling submission.
+        if attempt in (2, 5, 11, 17) and _press_enter():
+            return True
+        if attempt in (1, 3, 7, 13, 19) and _click_nearest_send_control():
+            return True
     return False
 
 
@@ -699,6 +822,7 @@ def send_prompt_to_gemini(
 ) -> str:
     """Gửi 1 prompt vào Gemini Web, trả về response text."""
     if log is None: log = lambda m: logger.info(m)
+    log("   🛠 AUTO-SEND v5: Enter x2 + click icon/tọa độ nút xanh")
 
     _own_driver = driver is None
     try:

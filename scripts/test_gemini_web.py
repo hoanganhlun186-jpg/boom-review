@@ -10,11 +10,13 @@ from core import gemini_web
 
 
 class FakeEditor:
-    def __init__(self, text='', visible=True, disabled=False):
+    def __init__(self, text='', visible=True, disabled=False, sends_after=1):
         self.text = text
         self.visible = visible
         self.disabled = disabled
         self.evaluate_calls = 0
+        self.press_calls = 0
+        self.sends_after = sends_after
 
     def is_visible(self):
         return self.visible
@@ -37,12 +39,16 @@ class FakeEditor:
         return None
 
     def press(self, key):
-        if key == 'Enter':
+        self.press_calls += 1
+        if key == 'Enter' and self.press_calls >= self.sends_after:
             self.text = ''
 
     def evaluate(self, script, value):
         self.evaluate_calls += 1
         self.text = value
+
+    def bounding_box(self):
+        return {'x': 100, 'y': 100, 'width': 500, 'height': 200}
 
 
 class FakePage:
@@ -85,6 +91,13 @@ class GeminiWebInputTests(unittest.TestCase):
         composer = FakeEditor('Prompt waiting to send')
         self.assertTrue(gemini_web._send_message(FakePage([composer])))
         self.assertEqual(composer.text, '')
+        self.assertEqual(composer.press_calls, 1)
+
+    def test_send_tries_enter_twice_before_button_fallback(self):
+        composer = FakeEditor('Prompt waiting to send', sends_after=2)
+        self.assertTrue(gemini_web._send_message(FakePage([composer])))
+        self.assertEqual(composer.text, '')
+        self.assertEqual(composer.press_calls, 2)
 
 
 class GeminiWebProfileTests(unittest.TestCase):
