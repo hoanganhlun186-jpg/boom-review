@@ -1,0 +1,28 @@
+FIX TTS WINERROR 206 - BOOM REVIEW
+
+DANH CHO MAY KHACH DANG CHAY EXE:
+1. Giai nen ZIP vao mot thu muc co quyen ghi, vi du Desktop\FIX_TTS.
+2. Dong BoomReview.
+3. Chuot phai FIX_TTS_WIN206.cmd > Run as administrator.
+4. Bam phim theo huong dan, sau do khoi dong lai Windows va thu lai.
+5. Neu van loi: trong BoomReview chon thu muc xuat ngan C:\BR, dat ten phim ngan (Phim01) va tao lan xuat moi tu kich ban da xac nhan.
+   Khong xoa thu muc cu; khong doi ten/di chuyen du an dang dang do.
+   Lan xuat moi co the tao lai TTS va tinh phi. Neu da co voice thanh cong, giu lai de nguoi ho tro kiem tra truoc.
+
+GIOI HAN:
+Bat LongPathsEnabled chi hieu qua voi ung dung ho tro longPathAware.
+Day la fix cau hinh Windows, KHONG phai ban BoomReview.exe moi.
+Neu exe khong ho tro, dung duong dan xuat ngan hoac ban exe da build lai.
+
+HOAN TAC:
+File chay tu luu gia tri cu vao LongPathsEnabled_before.reg trong cung thu muc.
+Nhap file .reg nay voi quyen admin neu muon phuc hoi; khoi dong lai Windows.
+
+DANH CHO BAN CHAY MA NGUON / NGUOI BUILD:
+Thu muc source\engine chua 2 file da sua. Sao luu file cu truoc khi thay the
+vao ma nguon cung phien ban, roi khoi dong lai hoac build lai ung dung.
+Khong chep cac file .py nay vao thu muc exe Nuitka de mong ghi de ma da bien dich.
+Da chay 8 kiem thu offline, bao gom duong dan xuat dai va tiep tuc job.
+
+Tham khao Microsoft:
+https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation

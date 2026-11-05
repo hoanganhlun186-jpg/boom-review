@@ -205,12 +205,23 @@ def _wait_for_job(key: str, job_id: str, timeout: float, poll_interval: float) -
     raise TimeoutError("Job 11LABS VN chưa xong trong thời gian chờ; trạng thái đã được lưu để tiếp tục sau.")
 
 
+def _resume_cache_root(parent: Path) -> Path:
+    root = parent / ".11labsvn_resume"
+    # Include the digest directory and longest atomic-write filename in the
+    # budget. Windows counts UTF-16 code units, including the terminating NUL.
+    longest = root / ("0" * 64) / "request.json.tmp"
+    if len(str(longest).encode("utf-16-le")) // 2 >= 240:
+        scope = hashlib.sha256(str(parent).encode("utf-8")).hexdigest()[:24]
+        root = Path(tempfile.gettempdir()) / "11vn" / scope
+    return root
+
+
 def _concat_audio(parts: list[Path], target: Path) -> None:
     if len(parts) == 1 and target.suffix.lower() == ".mp3":
         shutil.copy2(parts[0], target)
         return
     ffmpeg = FFmpegUtils.ffmpeg_executable()
-    with tempfile.TemporaryDirectory(prefix="11labsvn_concat_", dir=str(target.parent)) as folder:
+    with tempfile.TemporaryDirectory(prefix="vc_", dir=str(target.parent)) as folder:
         manifest = Path(folder) / "parts.txt"
         manifest.write_text(
             "".join("file '" + part.as_posix().replace("'", "'\\''") + "'\n" for part in parts),
@@ -254,7 +265,7 @@ def synthesize_11labs_vn(
         raise ValueError("11LABS VN hỗ trợ đầu ra .mp3 hoặc .wav.")
     target.parent.mkdir(parents=True, exist_ok=True)
     speed = _speed_from_rate(rate)
-    cache_root = target.parent / ".11labsvn_resume"
+    cache_root = _resume_cache_root(target.parent)
     cache_root.mkdir(parents=True, exist_ok=True)
     part_paths = []
 
@@ -316,7 +327,7 @@ def synthesize_11labs_vn(
         if progress_callback:
             progress_callback(int((index + 1) * 100 / len(chunks)), index + 1, len(chunks))
 
-    with tempfile.TemporaryDirectory(prefix="11labsvn_", dir=str(target.parent)) as folder:
+    with tempfile.TemporaryDirectory(prefix="vs_", dir=str(target.parent)) as folder:
         staged = Path(folder) / ("result" + target.suffix.lower())
         _concat_audio([Path(path) for path in part_paths], staged)
         if not staged.exists() or staged.stat().st_size < 100:

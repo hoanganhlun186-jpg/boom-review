@@ -3382,7 +3382,7 @@ Trả về DUY NHẤT JSON hợp lệ với 4 khóa:
                 raise ValueError("Nội dung tạo voice 11LABS VN đang trống.")
             output_path = os.path.abspath(output_path)
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="11labsvn_paced_", dir=os.path.dirname(output_path)) as folder:
+            with tempfile.TemporaryDirectory(prefix="vp_", dir=os.path.dirname(output_path)) as folder:
                 parts = []
                 for index, (segment_text, segment_rate) in enumerate(segments):
                     part = os.path.join(folder, f"part_{index}" + os.path.splitext(output_path)[1])

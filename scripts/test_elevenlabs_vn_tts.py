@@ -33,6 +33,24 @@ def response(status=200, payload=None, content=b""):
 
 
 class ElevenLabsVnTests(unittest.TestCase):
+    def test_long_export_path_uses_short_stable_resume_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            parent = Path(folder) / ("Phim dài " * 10).strip() / "voice_segments" / "vp_12345678"
+            with patch.object(provider.tempfile, "gettempdir", return_value=folder):
+                root = provider._resume_cache_root(parent)
+                self.assertEqual(root, provider._resume_cache_root(parent))
+                self.assertNotEqual(root, provider._resume_cache_root(parent / "other"))
+            self.assertEqual(root.parent, Path(folder) / "11vn")
+            completed = {"status": "completed", "download_url": "https://11labs.id.vn/audio/a.mp3"}
+            with patch.object(provider, "_resume_cache_root", return_value=root), \
+                    patch.object(provider.requests, "post", return_value=response(payload={"job_id": "JOB1"})) as post, \
+                    patch.object(provider.requests, "get", side_effect=[response(payload=completed), response(content=audio_fixture())]):
+                target = parent / "voice.mp3"
+                for _ in range(2):
+                    provider.synthesize_11labs_vn("Xin chào.", target, "11labsvn:voice_a", api_key="test")
+                self.assertEqual(post.call_count, 1)
+            self.assertLess(len(str(root / ("0" * 64) / "request.json.tmp")), 240)
+
     def test_ui_shows_only_selected_provider_voice_names(self):
         root = Path(__file__).resolve().parents[1]
         tree = ast.parse((root / "main.py").read_text(encoding="utf-8-sig"))
